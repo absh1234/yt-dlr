@@ -1,0 +1,47 @@
+name: 🤖 Bale Interactive Bot
+
+on:
+  schedule:
+    - cron: '*/2 * * * *'
+  workflow_dispatch:
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}   # برای commit کردن state
+
+      - name: Setup Git
+        run: |
+          git config user.email "bot@github"
+          git config user.name "Bale Bot"
+
+      - name: دریافت آپدیت‌ها
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          OFFSET_FILE=".bale_offset"
+          offset=0
+          [ -f "$OFFSET_FILE" ] && offset=$(cat "$OFFSET_FILE")
+          RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5")
+          echo "$RESPONSE" > updates.json
+          # آخرین update_id را ذخیره کن
+          jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE"
+
+      - name: پردازش پیام‌ها و فرمان‌ها
+        id: process
+        run: |
+          python3 process_updates.py   # اسکریپت پایتون برای مدیریت state و inline
+        env:
+          BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          GUARDNET_KEY: ${{ secrets.GUARDNET_API_KEY }}
+
+      - name: Commit state changes
+        if: always()
+        run: |
+          git add bale_state.json .bale_offset
+          git commit -m "Update bot state" || echo "No changes"
+          git push
