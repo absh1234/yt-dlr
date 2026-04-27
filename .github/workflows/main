@@ -1,0 +1,106 @@
+name: 🎬 YouTube Downloader → Guardnet → Bale
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'لینک ویدیو یوتیوب'
+        required: true
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      # ---------- کش ابزارها ----------
+      - name: Cache tools (yt-dlp, xray, ffmpeg)
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/tools
+          key: tools-${{ runner.os }}-v3
+
+      - name: Download yt-dlp
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
+          chmod +x ~/tools/yt-dlp
+
+      - name: Download Xray core
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip xray.zip -d ~/tools/xray
+          chmod +x ~/tools/xray/xray
+
+      - name: Download ffmpeg
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-*-amd64-static/ffprobe ~/tools/
+          chmod +x ~/tools/ffmpeg ~/tools/ffprobe
+
+      - name: Add tools to PATH
+        run: echo "$HOME/tools" >> $GITHUB_PATH
+
+      # ---------- اجرای پروکسی (در صورت وجود کانفیگ) ----------
+      - name: Setup Xray proxy
+        if: secrets.XRAY_CONFIG != ''
+        run: |
+          echo '${{ secrets.XRAY_CONFIG }}' > config.json
+          ~/tools/xray/xray run -config config.json &
+          sleep 2
+          echo "پروکسی فعال شد."
+
+      # ---------- دانلود بهترین کیفیت (ترجیح MP4) ----------
+      - name: Download video
+        run: |
+          PROXY_ARG=""
+          if [ -n "${{ secrets.XRAY_CONFIG }}" ]; then
+            PROXY_ARG="--proxy socks5://127.0.0.1:10808"
+          fi
+          yt-dlp $PROXY_ARG \
+            -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best" \
+            -o "video.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+          VIDEO_FILE=$(ls video.* 2>/dev/null | head -n 1)
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ دانلود شکست خورد"
+            exit 1
+          fi
+          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+
+      # ---------- تبدیل به MP4 در صورت نیاز (WebM) ----------
+      - name: Convert to MP4 if necessary
+        run: |
+          if [[ "$VIDEO_FILE" != *.mp4 ]]; then
+            echo "در حال تبدیل به MP4..."
+            ffmpeg -i "$VIDEO_FILE" -c:v libx264 -preset ultrafast -crf 30 -c:a aac -b:a 128k -movflags +faststart converted.mp4
+            echo "VIDEO_FILE=converted.mp4" >> $GITHUB_ENV
+          fi
+
+      # ---------- آپلود روی گاردنت و دریافت لینک ----------
+      - name: Upload to Guardnet & send link to Bale
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
+          API_KEY="${{ secrets.GUARDNET_API_KEY }}"
+
+          echo "📤 آپلود روی گاردنت..."
+          UPLOAD_RESPONSE=$(curl -s -X POST "https://guardnet.ir/api/files/upload" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -F "file=@${VIDEO_FILE}")
+
+          # استخراج لینک (مبتنی بر ساختار JSON پاسخ)
+          FILE_URL=$(echo "$UPLOAD_RESPONSE" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$FILE_URL" ]; then
+            echo "❌ خطا در آپلود. پاسخ سرور:"
+            echo "$UPLOAD_RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ لینک: $FILE_URL"
+
+          # ارسال لینک به کاربر در بله
+          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "🎬 دانلود آماده شد!\n📥 $FILE_URL" | jq -sRr @uri)"
