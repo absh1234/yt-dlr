@@ -1,13 +1,98 @@
-name: Test YouTube with Cookies
-on: workflow_dispatch
+name: 🎬 YouTube Downloader via Xray (SOCKS5)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'لینک ویدیو یوتیوب'
+        required: true
+
 jobs:
-  test:
+  download:
     runs-on: ubuntu-latest
     steps:
-      - name: Install yt-dlp
-        run: sudo apt-get update && sudo apt-get install -y yt-dlp
-      - name: Download with cookies
+      # ---------- کش کردن فایل‌های ضروری ----------
+      - name: Cache yt-dlp and xray binary
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/tools/yt-dlp
+            ~/tools/xray
+          key: tools-${{ runner.os }}-v2
+
+      # ---------- دانلود yt-dlp (در صورت نبود در کش) ----------
+      - name: Get yt-dlp
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-          yt-dlp --cookies cookies.txt -o "test.%(ext)s" "https://www.youtube.com/watch?v=NROCQCmA8ko"
-          ls -lah test.*
+          mkdir -p ~/tools
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
+          chmod +x ~/tools/yt-dlp
+
+      # ---------- دانلود Xray (نسخه لینوکس) ----------
+      - name: Get Xray core
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip xray.zip -d ~/tools/xray
+          chmod +x ~/tools/xray/xray
+
+      # ---------- آماده‌سازی و اجرای Xray ----------
+      - name: Setup Xray config and run
+        run: |
+          # ذخیره کانفیگ از Secret
+          echo '${{ secrets.XRAY_CONFIG }}' > config.json
+          # اجرای xray در پس‌زمینه
+          ~/tools/xray/xray run -config config.json &
+          sleep 2   # چند لحظه صبر برای اتصال تونل
+          # تست اتصال پروکسی (اختیاری)
+          curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
+          echo "پروکسی SOCKS5 فعال است."
+
+      # ---------- دانلود ویدیو با yt-dlp از طریق پروکسی ----------
+      - name: Download video with proxy
+        run: |
+          ~/tools/yt-dlp \
+            --proxy socks5://127.0.0.1:10808 \
+            -o "video.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+          VIDEO_FILE=$(ls video.* 2>/dev/null | head -n 1)
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ دانلود شکست خورد"
+            exit 1
+          fi
+          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          echo "SIZE=$(stat -c%s "$VIDEO_FILE")" >> $GITHUB_ENV
+
+      # ---------- ارسال به بله (تکی یا پارتیشن‌بندی) ----------
+      - name: Send to Bale
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
+          if [ "$SIZE" -le 10485760 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }}" | jq -sRr @uri)" \
+              -F "document=@$VIDEO_FILE"
+          else
+            mkdir parts && cd parts
+            split -b 10M ../$VIDEO_FILE part_
+            a=1
+            for f in part_*; do mv "$f" "part_${a}.$(echo "$VIDEO_FILE" | sed 's/video.//')"; a=$((a+1)); done
+            total=$(ls part_* | wc -l)
+            count=1
+            for part in part_*; do
+              for attempt in 1 2 3; do
+                RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }} - Part $count/$total" | jq -sRr @uri)" \
+                  -F "document=@$part")
+                if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
+                  break
+                fi
+                sleep 2
+              done
+              count=$((count+1))
+              sleep 1
+            done
+            cd ..
+            MERGE_CMD="copy /b $(ls parts/part_* | tr '\n' '+' | sed 's/+$//') full_video.$(echo "$VIDEO_FILE" | sed 's/video.//')"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
+          fi
