@@ -80,29 +80,42 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$VIDEO_FILE")" >> $GITHUB_ENV
 
-      # ---------- تقسیم ویدیو با ffmpeg (پارت‌های ۱۰MB) ----------
-      - name: Split video
-        if: env.SIZE > 10485760   # بیشتر از ۱۰MB
+      # ---------- تبدیل کل ویدیو به MP4 سازگار ----------
+      - name: Convert video to standard MP4
         run: |
-          # دریافت مدت زمان با خود ffmpeg
-          DURATION=$(ffmpeg -i "$VIDEO_FILE" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',' | awk -F: '{ print ($1*3600)+($2*60)+$3 }')
-          PART_MAX_SIZE=10485760  # ۱۰ مگابایت
-          TOTAL_PARTS=$(( ($SIZE + $PART_MAX_SIZE - 1) / $PART_MAX_SIZE ))
-          PART_TIME=$(echo "$DURATION $TOTAL_PARTS" | awk '{ print int($1/$2)+1 }')
+          CONVERTED="converted.mp4"
+          ffmpeg -i "$VIDEO_FILE" \
+            -c:v libx264 -crf 28 -preset fast \
+            -c:a aac -b:a 128k \
+            -movflags +faststart \
+            "$CONVERTED"
+          CONV_SIZE=$(stat -c%s "$CONVERTED")
+          echo "CONVERTED_FILE=$CONVERTED" >> $GITHUB_ENV
+          echo "CONV_SIZE=$CONV_SIZE" >> $GITHUB_ENV
+
+      # ---------- تقسیم با split (سریع و بدون افت) ----------
+      - name: Split video into 9MB parts
+        if: env.CONV_SIZE > 9437184   # بیشتر از ۹MB
+        run: |
           mkdir -p parts
-          ffmpeg -i "$VIDEO_FILE" -c copy -map 0 -segment_time $PART_TIME -f segment -reset_timestamps 1 parts/part_%03d.mp4
+          split -b 9437184 "$CONVERTED_FILE" parts/part_
+          # تغییر نام به part_001.mp4 با حفظ ترتیب
+          a=1
+          for f in parts/part_*; do
+            mv "$f" parts/$(printf "part_%03d.mp4" $a)
+            a=$((a + 1))
+          done
           echo "total_parts=$(ls parts/part_*.mp4 | wc -l)" >> $GITHUB_ENV
 
-      # ---------- ارسال به بله ----------
+      # ---------- ارسال ----------
       - name: Send to Bale
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          if [ "$SIZE" -le 10485760 ]; then   # ۱۰MB یا کمتر
-            RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
-              -F "document=@$VIDEO_FILE" \
-              -F "caption=🎬 ${{ github.event.inputs.url }}")
-            echo "$RESPONSE" | grep -q '"ok":true' && echo "✅ ارسال شد" || echo "❌ خطا: $RESPONSE"
+          if [ "$CONV_SIZE" -le 9437184 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+              -F "document=@$CONVERTED_FILE" \
+              -F "caption=🎬 ${{ github.event.inputs.url }}"
           else
             cd parts
             total=$total_parts
