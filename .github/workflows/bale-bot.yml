@@ -29,14 +29,14 @@ jobs:
           # آخرین update_id را ذخیره کن
           jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE"
 
-      - name: پردازش پیام‌ها و فرمان‌ها
+      - name: پردازش پیام‌ها و callbackها
         id: process
         run: |
-          # ایجاد فایل state در صورت عدم وجود
+          # ایجاد فایل state اگر وجود ندارد
           if [ ! -f bale_state.json ]; then
             echo '{}' > bale_state.json
           fi
-          # اگر پیامی نبود اجرا نشود
+          # اگر هیچ آپدیتی نبود، خارج شو
           if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json)" = "0" ]; then
             echo "هیچ پیام جدیدی نیست."
             exit 0
@@ -47,7 +47,6 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
           GUARDNET_KEY: ${{ secrets.GUARDNET_API_KEY }}
-
       - name: Commit state changes
         if: always()
         run: |
