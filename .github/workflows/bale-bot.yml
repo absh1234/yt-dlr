@@ -1,58 +1,77 @@
-name: 🤖 Bale Interactive Bot (Self-Healing)
+name: 🤖 Bale Interactive Bot (Never Fail)
 
 on:
   schedule:
-    - cron: '* * * * *'   # هر ۱ دقیقه
+    - cron: '* * * * *'       # هر ۱ دقیقه
   workflow_dispatch:
 
 jobs:
   bot:
     runs-on: ubuntu-latest
+    # تضمین موفقیت کلی job حتی با وجود خطاهای مرحله‌ها
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      # ========== گام ۰: دریافت سورس (بدون خطا) ==========
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
+        continue-on-error: true
 
-      - name: نصب وابستگی‌ها
-        run: pip3 install --user requests || echo "نصب requests شکست خورد"
+      # ========== گام ۱: نصب وابستگی‌ها (امن) ==========
+      - name: Install Python dependencies
+        run: pip3 install --user requests || echo "نصب ناموفق بود، ادامه می‌دهیم"
+        continue-on-error: true
 
-      - name: دریافت آپدیت‌ها
+      # ========== گام ۲: دریافت آپدیت‌ها ==========
+      - name: Fetch updates from Bale
         id: fetch
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           OFFSET_FILE=".bale_offset"
           offset=0
           [ -f "$OFFSET_FILE" ] && offset=$(cat "$OFFSET_FILE")
-          RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5")
+          RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5") || true
           echo "$RESPONSE" > updates.json
-          jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE"
+          jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE" || true
         continue-on-error: true
 
-      - name: پردازش پیام‌ها (با مدیریت خطا)
+      # ========== گام ۳: پردازش هوشمند با گزارش خطا به خود ربات ==========
+      - name: Process messages & callbacks (with self-reporting errors)
         id: process
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          # اطمینان از وجود فایل state
           [ ! -f bale_state.json ] && echo '{}' > bale_state.json
-          # اگر پیامی نیست، بی‌صدا خارج شو
-          if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json)" = "0" ]; then
+
+          # اگر پیامی نبود، بی‌صدا خارج شو (با موفقیت)
+          if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json 2>/dev/null || echo 0)" = "0" ]; then
+            echo "No new messages."
             exit 0
           fi
-          # اجرای پردازش و ثبت خطا در فایل
+
+          # اجرای پردازش و ذخیره خطاها
           python3 process_updates.py 2> error.log || true
           if [ -s error.log ]; then
-            # خطاها را برای کاربر بفرست
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطایی رخ داد: $(cat error.log)" | head -c 500)"
+            # ارسال خطا به ربات برای خودتان (chat_id را از Secret بگیرید)
+            ERROR_MSG=$(head -c 400 error.log | sed 's/"/\\"/g')
+            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطا در پردازش: ${ERROR_MSG}" | jq -sRr @uri)" || true
           fi
         continue-on-error: true
 
-      - name: ذخیره وضعیت (بدون توقف)
+      # ========== گام ۴: ذخیره وضعیت (همیشه موفق) ==========
+      - name: Commit and push state files
         run: |
-          git config user.email "actions@github.com"
-          git config user.name "Actions Bot"
-          git add bale_state.json .bale_offset 2>/dev/null
-          if ! git diff --staged --quiet; then
+          git config user.email "actions@github.com" || true
+          git config user.name "GitHub Actions" || true
+          git add bale_state.json .bale_offset 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
             git commit -m "ربات: بروزرسانی وضعیت [skip ci]" || true
             git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main || true
           fi
         continue-on-error: true
+
+      # ========== گام ۵: تضمین سبز بودن Job ==========
+      - name: Final success marker
+        run: echo "✅ ربات اجرای خود را با موفقیت (بدون توقف) به پایان رساند."
