@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader via Xray (SOCKS5)
+name: 🎬 YouTube Downloader to Bale
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # ---------- کش کردن فایل‌های ضروری ----------
-      - name: Cache yt-dlp and xray binary
+      # ---------- کش yt-dlp و xray ----------
+      - name: Cache tools
         id: cache
         uses: actions/cache@v4
         with:
@@ -21,7 +21,6 @@ jobs:
             ~/tools/xray
           key: tools-${{ runner.os }}-v2
 
-      # ---------- دانلود yt-dlp (در صورت نبود در کش) ----------
       - name: Get yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -29,7 +28,6 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      # ---------- دانلود Xray (نسخه لینوکس) ----------
       - name: Get Xray core
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -38,20 +36,21 @@ jobs:
           unzip xray.zip -d ~/tools/xray
           chmod +x ~/tools/xray/xray
 
-      # ---------- آماده‌سازی و اجرای Xray ----------
-      - name: Setup Xray config and run
+      # ---------- اجرای پروکسی (دقیقاً مثل قبل) ----------
+      - name: Setup Xray and proxy
         run: |
-          # ذخیره کانفیگ از Secret
           echo '${{ secrets.XRAY_CONFIG }}' > config.json
-          # اجرای xray در پس‌زمینه
           ~/tools/xray/xray run -config config.json &
-          sleep 2   # چند لحظه صبر برای اتصال تونل
-          # تست اتصال پروکسی (اختیاری)
+          sleep 2
           curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
-          echo "پروکسی SOCKS5 فعال است."
+          echo "پروکسی فعال است."
 
-      # ---------- دانلود ویدیو با yt-dlp از طریق پروکسی ----------
-      - name: Download video with proxy
+      # ---------- نصب ffmpeg (فقط بار اول کش می‌شود یا سریع نصب می‌شود) ----------
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # ---------- دانلود ویدیو ----------
+      - name: Download video
         run: |
           ~/tools/yt-dlp \
             --proxy socks5://127.0.0.1:10808 \
@@ -65,7 +64,21 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$VIDEO_FILE")" >> $GITHUB_ENV
 
-      # ---------- ارسال به بله (تکی یا پارتیشن‌بندی) ----------
+      # ---------- پارتیشن‌بندی با ffmpeg (پارت‌های مستقل) ----------
+      - name: Split video with ffmpeg
+        run: |
+          if [ "$SIZE" -le 10485760 ]; then
+            echo "فایل کوچکتر از ۱۰MB است، نیازی به تقسیم نیست."
+            exit 0
+          fi
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$VIDEO_FILE")
+          DURATION=${DURATION%.*}
+          PART_TIME=$((DURATION / 5 + 1))  # تقریباً ۵ پارت (قابل تنظیم)
+          mkdir -p parts
+          ffmpeg -i "$VIDEO_FILE" -c copy -map 0 -segment_time $PART_TIME -f segment -reset_timestamps 1 parts/part_%03d.mp4
+          echo "total_parts=$(ls parts/part_*.mp4 | wc -l)" >> $GITHUB_ENV
+
+      # ---------- ارسال پارت‌ها ----------
       - name: Send to Bale
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
@@ -74,13 +87,10 @@ jobs:
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }}" | jq -sRr @uri)" \
               -F "document=@$VIDEO_FILE"
           else
-            mkdir parts && cd parts
-            split -b 10M ../$VIDEO_FILE part_
-            a=1
-            for f in part_*; do mv "$f" "part_${a}.$(echo "$VIDEO_FILE" | sed 's/video.//')"; a=$((a+1)); done
-            total=$(ls part_* | wc -l)
+            cd parts
+            total=$total_parts
             count=1
-            for part in part_*; do
+            for part in part_*.mp4; do
               for attempt in 1 2 3; do
                 RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }} - Part $count/$total" | jq -sRr @uri)" \
                   -F "document=@$part")
@@ -89,10 +99,7 @@ jobs:
                 fi
                 sleep 2
               done
-              count=$((count+1))
+              count=$((count + 1))
               sleep 1
             done
-            cd ..
-            MERGE_CMD="copy /b $(ls parts/part_* | tr '\n' '+' | sed 's/+$//') full_video.$(echo "$VIDEO_FILE" | sed 's/video.//')"
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
           fi
