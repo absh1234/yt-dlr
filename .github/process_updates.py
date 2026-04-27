@@ -116,5 +116,18 @@ for upd in updates:
             send_message(chat, f"✅ درخواست دانلود {asset} از {repo} دریافت شد. فایل به‌زودی ارسال می‌شود.")
         elif data.startswith('yt_'):
             quality = data
-            send_message(chat, "لطفاً لینک ویدیو یوتیوب را ارسال کنید:")
             update_state(chat, {'step': 'await_yt_url', 'quality': quality})
+            send_message(chat, "لطفاً لینک ویدیو یوتیوب را ارسال کنید:")
+
+        # سپس هنگام دریافت لینک (state 'await_yt_url')
+        state = get_state(chat)
+        if state and state.get('step') == 'await_yt_url':
+            url = text.strip()
+            quality = state['quality']
+            trigger_workflow('yt-downloader.yml', {
+                'url': url,
+                'quality': quality,
+                'chat_id': str(chat)
+            })
+            send_message(chat, "✅ درخواست دریافت شد. لینک دانلود به‌زودی ارسال می‌شود.")
+            update_state(chat, {'step': 'main_menu'})
