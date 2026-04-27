@@ -1,0 +1,47 @@
+name: YouTube Downloader to Bale
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'لینک ویدیو یوتیوب'
+        required: true
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: نصب yt-dlp
+        run: |
+          sudo apt-get update && sudo apt-get install -y yt-dlp
+
+      - name: دانلود ویدیو
+        run: |
+          yt-dlp -o "video.mp4" "${{ github.event.inputs.url }}"
+          SIZE=$(stat -c%s video.mp4)
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
+
+      - name: ارسال فایل (تکی یا پارتیشن‌بندی)
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
+          if [ "$SIZE" -le 20971520 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+              -F "document=@video.mp4" -F "caption=🎬 ویدیو"
+          else
+            mkdir parts && cd parts
+            split -b 20M ../video.mp4 part_
+            a=1
+            for f in part_*; do mv "$f" "part_${a}.mp4"; a=$((a+1)); done
+            total=$(ls part_*.mp4 | wc -l)
+            count=1
+            for part in part_*.mp4; do
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+                -F "document=@$part" -F "caption=🎬 ویدیو - Part $count/$total"
+              count=$((count+1))
+              sleep 2
+            done
+            # دستور ادغام برای CMD
+            MERGE_CMD="copy /b $(ls part_*.mp4 | tr '\n' '+' | sed 's/+$//') full_video.mp4"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
+          fi
