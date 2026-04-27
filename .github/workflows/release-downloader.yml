@@ -1,0 +1,56 @@
+name: 📦 Release to Bale (Direct)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        required: true
+      asset_name:
+        required: true
+      tag:
+        required: true
+
+jobs:
+  release-to-bale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: دانلود
+        uses: robinraju/release-downloader@v1.13
+        with:
+          repository: ${{ inputs.repo }}
+          fileName: ${{ inputs.asset_name }}
+          tag: ${{ inputs.tag }}
+          out-file-path: ./files
+
+      - name: فشرده‌سازی
+        run: cd files && zip -r ../archive.zip ./* && cd ..
+
+      - name: ارسال به بله (با پارتیشن‌بندی خودکار)
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
+          SIZE=$(stat -c%s archive.zip)
+          if [ "$SIZE" -le 47185920 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "📦 ${{ inputs.repo }}" | jq -sRr @uri)" \
+              -F "document=@archive.zip"
+          else
+            mkdir parts && cd parts
+            split -b 45M ../archive.zip part_
+            a=1
+            for f in part_*; do mv "$f" "part_${a}.zip"; a=$((a+1)); done
+            total=$(ls part_*.zip | wc -l)
+            count=1
+            for part in part_*.zip; do
+              for attempt in 1 2 3; do
+                RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "📦 ${{ inputs.repo }} - Part $count/$total" | jq -sRr @uri)" \
+                  -F "document=@$part")
+                if echo "$RESPONSE" | grep -q '"ok":true'; then break; fi
+                sleep 2
+              done
+              count=$((count+1))
+              sleep 1
+            done
+            # ارسال دستور ادغام
+            MERGE_CMD="copy /b $(ls part_*.zip | tr '\n' '+' | sed 's/+$//') full_archive.zip"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
+          fi
