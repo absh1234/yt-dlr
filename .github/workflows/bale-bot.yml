@@ -43,16 +43,20 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           [ ! -f bale_state.json ] && echo '{}' > bale_state.json
 
-          # اگر پیامی نبود، بی‌صدا خارج شو (با موفقیت)
           if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json 2>/dev/null || echo 0)" = "0" ]; then
             echo "No new messages."
             exit 0
           fi
 
-          # اجرای پردازش و ذخیره خطاها
-          python3 process_updates.py 2> error.log || true
+          python3 process_updates.py \
+            --token "${{ secrets.BALE_BOT_TOKEN }}" \
+            --gh_pat "${{ secrets.GH_PAT }}" \
+            --repo "${{ github.repository }}" \
+            --guardnet_key "${{ secrets.GUARDNET_API_KEY }}" \
+            --chat_id "${{ secrets.BALE_CHAT_ID }}" \
+            2> error.log || true
+
           if [ -s error.log ]; then
-            # ارسال خطا به ربات برای خودتان (chat_id را از Secret بگیرید)
             ERROR_MSG=$(head -c 400 error.log | sed 's/"/\\"/g')
             curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطا در پردازش: ${ERROR_MSG}" | jq -sRr @uri)" || true
           fi
