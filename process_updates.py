@@ -139,12 +139,12 @@ for upd in updates:
         # همیشه اول جواب callback را بده تا دکمه برگردد
         answer_callback(cb_id)
 
-        # --- منوی اصلی ---
-        if data == 'yt_start':
+        # --- منوی اصلی (پشتیبانی از هر دو نام) ---
+        if data in ('yt_start', 'menu_youtube'):
             send_message(chat_id, "کیفیت مورد نظر را انتخاب کنید:", YT_QUALITY_KEYBOARD)
             update_state(chat_id, {'step': 'choose_yt_quality'})
 
-        elif data == 'rel_start':
+        elif data in ('rel_start', 'menu_release'):
             send_message(chat_id, "لطفاً نام مخزن را به صورت owner/repo ارسال کنید:")
             update_state(chat_id, {'step': 'await_repo'})
 
