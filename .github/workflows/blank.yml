@@ -15,10 +15,18 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y yt-dlp
 
-      - name: دانلود ویدیو
+      - name: دانلود ویدیو با کوکی
         run: |
-          yt-dlp -o "video.mp4" "${{ github.event.inputs.url }}"
-          SIZE=$(stat -c%s video.mp4)
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+          yt-dlp --cookies cookies.txt -o "video.%(ext)s" "${{ github.event.inputs.url }}"
+          # پیدا کردن فایل خروجی
+          VIDEO_FILE=$(ls video.* 2>/dev/null | head -n 1)
+          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "دانلود شکست خورد"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$VIDEO_FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
 
       - name: ارسال فایل (تکی یا پارتیشن‌بندی)
