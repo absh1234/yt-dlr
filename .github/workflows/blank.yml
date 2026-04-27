@@ -1,55 +1,13 @@
-name: YouTube Downloader to Bale
-
-on:
-  workflow_dispatch:
-    inputs:
-      url:
-        description: 'لینک ویدیو یوتیوب'
-        required: true
-
+name: Test YouTube with Cookies
+on: workflow_dispatch
 jobs:
-  download-and-send:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: نصب yt-dlp
-        run: |
-          sudo apt-get update && sudo apt-get install -y yt-dlp
-
-      - name: دانلود ویدیو با کوکی
+      - name: Install yt-dlp
+        run: sudo apt-get update && sudo apt-get install -y yt-dlp
+      - name: Download with cookies
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-          yt-dlp --cookies cookies.txt -o "video.%(ext)s" "${{ github.event.inputs.url }}"
-          # پیدا کردن فایل خروجی
-          VIDEO_FILE=$(ls video.* 2>/dev/null | head -n 1)
-          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
-          if [ -z "$VIDEO_FILE" ]; then
-            echo "دانلود شکست خورد"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$VIDEO_FILE")
-          echo "SIZE=$SIZE" >> $GITHUB_ENV
-
-      - name: ارسال فایل (تکی یا پارتیشن‌بندی)
-        run: |
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
-          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          if [ "$SIZE" -le 20971520 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
-              -F "document=@video.mp4" -F "caption=🎬 ویدیو"
-          else
-            mkdir parts && cd parts
-            split -b 20M ../video.mp4 part_
-            a=1
-            for f in part_*; do mv "$f" "part_${a}.mp4"; a=$((a+1)); done
-            total=$(ls part_*.mp4 | wc -l)
-            count=1
-            for part in part_*.mp4; do
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
-                -F "document=@$part" -F "caption=🎬 ویدیو - Part $count/$total"
-              count=$((count+1))
-              sleep 2
-            done
-            # دستور ادغام برای CMD
-            MERGE_CMD="copy /b $(ls part_*.mp4 | tr '\n' '+' | sed 's/+$//') full_video.mp4"
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
-          fi
+          yt-dlp --cookies cookies.txt -o "test.%(ext)s" "https://www.youtube.com/watch?v=NROCQCmA8ko"
+          ls -lah test.*
