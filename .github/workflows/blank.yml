@@ -84,16 +84,18 @@ jobs:
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           if [ "$SIZE" -le 10485760 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }}" | jq -sRr @uri)" \
-              -F "document=@$VIDEO_FILE"
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+              -F "document=@$VIDEO_FILE" \
+              -F "caption=🎬 ${{ github.event.inputs.url }}"
           else
             cd parts
             total=$total_parts
             count=1
             for part in part_*.mp4; do
               for attempt in 1 2 3; do
-                RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "🎬 ${{ github.event.inputs.url }} - Part $count/$total" | jq -sRr @uri)" \
-                  -F "document=@$part")
+                RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+                  -F "document=@$part" \
+                  -F "caption=🎬 ${{ github.event.inputs.url }} - Part $count/$total")
                 if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
                   break
                 fi
