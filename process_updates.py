@@ -1,133 +1,192 @@
-import os, json, requests, re
+#!/usr/bin/env python3
+import os, json, requests, sys, re
 
-BALE = os.environ['BALE_TOKEN']
+# ---------- تنظیمات از محیط ----------
+BALE_TOKEN = os.environ['BALE_TOKEN']
+BASE_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 GH_PAT = os.environ['GH_PAT']
 REPO = os.environ['REPO']
-GUARDNET_KEY = os.environ['GUARDNET_KEY']
+GUARDNET_KEY = os.environ.get('GUARDNET_KEY', '')
 
-API_URL = f"https://tapi.bale.ai/bot{BALE}"
 GH_API = "https://api.github.com"
+HEADERS_GH = {
+    "Authorization": f"Bearer {GH_PAT}",
+    "Accept": "application/vnd.github.v3+json"
+}
 
+# ---------- توابع کمکی ----------
 def send_message(chat_id, text, reply_markup=None):
-    payload = {'chat_id': chat_id, 'text': text}
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
-    requests.post(f"{API_URL}/sendMessage", json=payload)
+        payload["reply_markup"] = json.dumps(reply_markup)
+    requests.post(f"{BASE_URL}/sendMessage", json=payload)
 
-def answer_callback(callback_id, text=None):
-    payload = {'callback_query_id': callback_id}
+def answer_callback(cb_id, text=None):
+    payload = {"callback_query_id": cb_id}
     if text:
-        payload['text'] = text
-    requests.post(f"{API_URL}/answerCallbackQuery", json=payload)
+        payload["text"] = text
+    requests.post(f"{BASE_URL}/answerCallbackQuery", json=payload)
 
 def update_state(chat_id, new_state):
-    with open('bale_state.json', 'r+') as f:
-        state = json.load(f)
-        state[str(chat_id)] = new_state
-        f.seek(0)
-        json.dump(state, f)
-        f.truncate()
+    state = load_state()
+    state[str(chat_id)] = new_state
+    save_state(state)
 
 def get_state(chat_id):
+    return load_state().get(str(chat_id))
+
+def load_state():
     try:
-        with open('bale_state.json') as f:
-            return json.load(f).get(str(chat_id))
-    except:
-        return None
+        with open('bale_state.json', 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_state(state):
+    with open('bale_state.json', 'w') as f:
+        json.dump(state, f, indent=2)
 
 def trigger_workflow(workflow_file, inputs):
-    headers = {
-        'Authorization': f'Bearer {GH_PAT}',
-        'Accept': 'application/vnd.github.v3+json'
-    }
     url = f"{GH_API}/repos/{REPO}/actions/workflows/{workflow_file}/dispatches"
-    requests.post(url, json={'ref':'main', 'inputs': inputs}, headers=headers)
+    payload = {"ref": "main", "inputs": inputs}
+    r = requests.post(url, headers=HEADERS_GH, json=payload)
+    return r.status_code
 
-# اصلی
-with open('updates.json') as f:
-    updates = json.load(f).get('result', [])
+# ---------- منوهای کلیدی ----------
+MAIN_KEYBOARD = {
+    "inline_keyboard": [
+        [{"text": "🎬 یوتیوب", "callback_data": "yt_start"},
+         {"text": "📦 ریلیز", "callback_data": "rel_start"}]
+    ]
+}
+
+YT_QUALITY_KEYBOARD = {
+    "inline_keyboard": [
+        [{"text": "🎥 بهترین کیفیت", "callback_data": "yt_best"}],
+        [{"text": "📺 720p", "callback_data": "yt_720p"}],
+        [{"text": "🎵 فقط صدا", "callback_data": "yt_audio"}]
+    ]
+}
+
+# ---------- پردازش اصلی ----------
+with open('updates.json', 'r') as f:
+    data = json.load(f)
+
+updates = data.get('result', [])
+if not updates:
+    print("هیچ آپدیتی موجود نیست.")
+    sys.exit(0)
 
 for upd in updates:
+    # ---- پیام متنی ----
     if 'message' in upd:
         msg = upd['message']
-        chat = msg['chat']['id']
-        text = msg.get('text', '')
-        # مدیریت دستور /start
-        if text == '/start':
-            keyboard = {'inline_keyboard': [
-                [{'text': '🎬 یوتیوب', 'callback_data': 'menu_youtube'},
-                 {'text': '📦 ریلیز', 'callback_data': 'menu_release'}]
-            ]}
-            send_message(chat, "به ربات دانلودر خوش آمدید! لطفاً یکی از گزینه‌ها را انتخاب کنید:", keyboard)
-            update_state(chat, {'step': 'main_menu'})
-        # حالت‌های مختلف بر اساس state موجود
-        else:
-            state = get_state(chat)
-            if state and state.get('step') == 'await_repo':
-                repo = text.strip()
-                # دریافت لیست ریلیزها از گیتهاب
-                releases = requests.get(f"https://api.github.com/repos/{repo}/releases").json()
-                if not releases:
-                    send_message(chat, "❌ مخزن پیدا نشد یا ریلیزی ندارد.")
-                else:
-                    buttons = []
-                    for rel in releases[:10]:
-                        tag = rel['tag_name']
-                        buttons.append([{'text': tag, 'callback_data': f"rel_tag:{repo}:{tag}"}])
-                    send_message(chat, "📌 یک نسخه را انتخاب کنید:", {'inline_keyboard': buttons})
-                    update_state(chat, {'step': 'choose_release', 'repo': repo})
-            # ... ادامه مدیریت سایر state ها و callback_query
-    elif 'callback_query' in upd:
-        cb = upd['callback_query']
-        chat = cb['message']['chat']['id']
-        data = cb['data']
-        cb_id = cb['id']
-        answer_callback(cb_id)  # بستن دکمه
-        if data == 'menu_youtube':
-            keyboard = {'inline_keyboard': [
-                [{'text': '🎥 بهترین کیفیت', 'callback_data': 'yt_best'}],
-                [{'text': '📺 720p', 'callback_data': 'yt_720p'}],
-                [{'text': '🎵 فقط صدا', 'callback_data': 'yt_audio'}]
-            ]}
-            send_message(chat, "کیفیت دانلود را انتخاب کنید:", keyboard)
-            update_state(chat, {'step': 'choose_yt_quality'})
-        elif data == 'menu_release':
-            send_message(chat, "لطفاً نام مخزن را به صورت owner/repo ارسال کنید:")
-            update_state(chat, {'step': 'await_repo'})
-        elif data.startswith('rel_tag:'):
-            _, repo, tag = data.split(':',2)
-            # دریافت دارایی‌های اون ریلیز
-            rel = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}").json()
-            assets = rel.get('assets', [])
-            buttons = []
-            for asset in assets:
-                name = asset['name']
-                buttons.append([{'text': name, 'callback_data': f"rel_asset:{repo}:{tag}:{name}"}])
-            if not assets:
-                send_message(chat, "این ریلیز فایلی ندارد.")
-            else:
-                send_message(chat, "📎 فایل مورد نظر را انتخاب کنید:", {'inline_keyboard': buttons})
-        elif data.startswith('rel_asset:'):
-            _, repo, tag, asset = data.split(':',3)
-            # فراخوانی workflow ریلیز
-            trigger_workflow('release-downloader.yml', {
-                'repo': repo, 'asset_name': asset, 'tag': tag
-            })
-            send_message(chat, f"✅ درخواست دانلود {asset} از {repo} دریافت شد. فایل به‌زودی ارسال می‌شود.")
-        elif data.startswith('yt_'):
-            quality = data
-            update_state(chat, {'step': 'await_yt_url', 'quality': quality})
-            send_message(chat, "لطفاً لینک ویدیو یوتیوب را ارسال کنید:")
+        chat_id = msg['chat']['id']
+        text = msg.get('text', '').strip()
 
-        # سپس هنگام دریافت لینک (state 'await_yt_url')
-        state = get_state(chat)
-        if state and state.get('step') == 'await_yt_url':
-            url = text.strip()
-            quality = state['quality']
+        # دستور /start
+        if text == '/start':
+            update_state(chat_id, {'step': 'main'})
+            send_message(chat_id, "به ربات دانلودر خوش آمدید! لطفاً یک گزینه را انتخاب کنید:", MAIN_KEYBOARD)
+            continue
+
+        # مدیریت بر اساس state کاربر
+        state = get_state(chat_id) or {'step': 'main'}
+
+        if state['step'] == 'await_repo':
+            repo_name = text.split()[0]
+            # بررسی وجود مخزن
+            resp = requests.get(f"{GH_API}/repos/{repo_name}", headers=HEADERS_GH)
+            if resp.status_code != 200:
+                send_message(chat_id, "❌ مخزن یافت نشد. لطفاً دوباره امتحان کنید.")
+                continue
+            # دریافت لیست ریلیزها
+            rel_resp = requests.get(f"{GH_API}/repos/{repo_name}/releases?per_page=10", headers=HEADERS_GH)
+            if rel_resp.status_code != 200 or not rel_resp.json():
+                send_message(chat_id, "❌ هیچ ریلیزی برای این مخزن پیدا نشد.")
+                continue
+            releases = rel_resp.json()
+            keyboard = {"inline_keyboard": []}
+            for rel in releases[:10]:
+                tag = rel['tag_name']
+                keyboard['inline_keyboard'].append([{"text": tag, "callback_data": f"rel_tag:{repo_name}:{tag}"}])
+            send_message(chat_id, "📌 یک نسخه را انتخاب کنید:", keyboard)
+            update_state(chat_id, {'step': 'choose_release', 'repo': repo_name})
+
+        elif state['step'] == 'await_yt_url':
+            # ذخیره کیفیت انتخابی و فراخوانی workflow
+            quality = state.get('quality', 'best')
+            url = text
             trigger_workflow('yt-downloader.yml', {
                 'url': url,
                 'quality': quality,
-                'chat_id': str(chat)
+                'chat_id': str(chat_id)
             })
-            send_message(chat, "✅ درخواست دریافت شد. لینک دانلود به‌زودی ارسال می‌شود.")
-            update_state(chat, {'step': 'main_menu'})
+            send_message(chat_id, "✅ درخواست دریافت شد. لینک دانلود به‌زودی ارسال می‌شود.")
+            update_state(chat_id, {'step': 'main'})
+
+        # برگشت به منوی اصلی در صورت پیام ناشناس
+        else:
+            send_message(chat_id, "لطفاً یکی از گزینه‌های منو را انتخاب کنید.", MAIN_KEYBOARD)
+
+    # ---- callback_query (کلیک روی دکمه) ----
+    elif 'callback_query' in upd:
+        cb = upd['callback_query']
+        chat_id = cb['message']['chat']['id']
+        cb_id = cb['id']
+        data = cb['data']
+
+        # همیشه اول جواب callback را بده تا دکمه برگردد
+        answer_callback(cb_id)
+
+        # --- منوی اصلی ---
+        if data == 'yt_start':
+            send_message(chat_id, "کیفیت مورد نظر را انتخاب کنید:", YT_QUALITY_KEYBOARD)
+            update_state(chat_id, {'step': 'choose_yt_quality'})
+
+        elif data == 'rel_start':
+            send_message(chat_id, "لطفاً نام مخزن را به صورت owner/repo ارسال کنید:")
+            update_state(chat_id, {'step': 'await_repo'})
+
+        # --- انتخاب کیفیت یوتیوب ---
+        elif data in ('yt_best', 'yt_720p', 'yt_audio'):
+            quality_map = {'yt_best': 'best', 'yt_720p': '720p', 'yt_audio': 'audio'}
+            quality = quality_map[data]
+            update_state(chat_id, {'step': 'await_yt_url', 'quality': quality})
+            send_message(chat_id, "لطفاً لینک ویدیو یوتیوب را ارسال کنید:")
+
+        # --- انتخاب ریلیز (tag) ---
+        elif data.startswith('rel_tag:'):
+            _, repo, tag = data.split(':', 2)
+            # دریافت اطلاعات ریلیز
+            rel_url = f"{GH_API}/repos/{repo}/releases/tags/{tag}"
+            rel_resp = requests.get(rel_url, headers=HEADERS_GH)
+            if rel_resp.status_code != 200:
+                send_message(chat_id, "❌ خطا در دریافت اطلاعات ریلیز.")
+                continue
+            rel_data = rel_resp.json()
+            assets = rel_data.get('assets', [])
+            if not assets:
+                send_message(chat_id, "این ریلیز فایلی برای دانلود ندارد.")
+                continue
+            keyboard = {"inline_keyboard": []}
+            for asset in assets:
+                name = asset['name']
+                keyboard['inline_keyboard'].append([{"text": name, "callback_data": f"rel_asset:{repo}:{tag}:{name}"}])
+            send_message(chat_id, "📎 فایل مورد نظر را انتخاب کنید:", keyboard)
+            update_state(chat_id, {'step': 'choose_asset', 'repo': repo, 'tag': tag})
+
+        # --- انتخاب فایل ریلیز و فراخوانی workflow ---
+        elif data.startswith('rel_asset:'):
+            _, repo, tag, asset_name = data.split(':', 3)
+            trigger_workflow('release-downloader.yml', {
+                'repo': repo,
+                'asset_name': asset_name,
+                'tag': tag
+            })
+            send_message(chat_id, f"✅ درخواست دانلود `{asset_name}` از `{repo}` دریافت شد. فایل به‌زودی در بله ارسال می‌شود.")
+            update_state(chat_id, {'step': 'main'})
+
+        # --- هر داده ناشناخته ---
+        else:
+            print(f"callback ناشناخته: {data}")
