@@ -85,7 +85,7 @@ jobs:
         run: |
           CONVERTED="converted.mp4"
           ffmpeg -i "$VIDEO_FILE" \
-            -c:v libx264 -crf 28 -preset fast \
+            -c:v libx264 -preset ultrafast -crf 30 \
             -c:a aac -b:a 128k \
             -movflags +faststart \
             "$CONVERTED"
