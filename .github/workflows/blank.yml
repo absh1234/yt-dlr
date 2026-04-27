@@ -80,31 +80,29 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$VIDEO_FILE")" >> $GITHUB_ENV
 
-      # ---------- پارتیشن‌بندی با ffmpeg (پارت‌های مستقل) ----------
-      - name: Split video with ffmpeg
+      # ---------- تقسیم ویدیو با ffmpeg (پارت‌های ۱۰MB) ----------
+      - name: Split video
+        if: env.SIZE > 10485760   # بیشتر از ۱۰MB
         run: |
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$VIDEO_FILE")
-          PART_MAX_SIZE=47185920  # ۴۵ مگابایت (کمی کمتر از ۵۰)
+          # دریافت مدت زمان با خود ffmpeg
+          DURATION=$(ffmpeg -i "$VIDEO_FILE" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',' | awk -F: '{ print ($1*3600)+($2*60)+$3 }')
+          PART_MAX_SIZE=10485760  # ۱۰ مگابایت
           TOTAL_PARTS=$(( ($SIZE + $PART_MAX_SIZE - 1) / $PART_MAX_SIZE ))
-          PART_TIME=$(( ($DURATION + $TOTAL_PARTS - 1) / $TOTAL_PARTS ))
+          PART_TIME=$(echo "$DURATION $TOTAL_PARTS" | awk '{ print int($1/$2)+1 }')
           mkdir -p parts
           ffmpeg -i "$VIDEO_FILE" -c copy -map 0 -segment_time $PART_TIME -f segment -reset_timestamps 1 parts/part_%03d.mp4
           echo "total_parts=$(ls parts/part_*.mp4 | wc -l)" >> $GITHUB_ENV
 
-      # ---------- ارسال پارت‌ها ----------
+      # ---------- ارسال به بله ----------
       - name: Send to Bale
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          if [ "$SIZE" -le 10485760 ]; then
+          if [ "$SIZE" -le 10485760 ]; then   # ۱۰MB یا کمتر
             RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
               -F "document=@$VIDEO_FILE" \
               -F "caption=🎬 ${{ github.event.inputs.url }}")
-            if echo "$RESPONSE" | grep -q '"ok":true'; then
-              echo "✅ فایل اصلی ارسال شد"
-            else
-              echo "❌ خطا در ارسال فایل اصلی: $RESPONSE"
-            fi
+            echo "$RESPONSE" | grep -q '"ok":true' && echo "✅ ارسال شد" || echo "❌ خطا: $RESPONSE"
           else
             cd parts
             total=$total_parts
@@ -118,7 +116,7 @@ jobs:
                   echo "✅ $part ارسال شد"
                   break
                 else
-                  echo "⚠️ تلاش $attempt ناموفق: $RESPONSE"
+                  echo "⚠️ تلاش $attempt: $RESPONSE"
                   sleep 2
                 fi
               done
