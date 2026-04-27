@@ -46,8 +46,24 @@ jobs:
           echo "پروکسی فعال است."
 
       # ---------- نصب ffmpeg (فقط بار اول کش می‌شود یا سریع نصب می‌شود) ----------
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/tools/ffmpeg
+          key: ffmpeg-${{ runner.os }}-v1
+
+      - name: Download ffmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-*-amd64-static/ffprobe ~/tools/
+          chmod +x ~/tools/ffmpeg ~/tools/ffprobe
+
+      - name: Add ffmpeg to PATH
+        run: echo "$HOME/tools" >> $GITHUB_PATH
 
       # ---------- دانلود ویدیو ----------
       - name: Download video
@@ -84,9 +100,14 @@ jobs:
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           if [ "$SIZE" -le 10485760 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+            RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
               -F "document=@$VIDEO_FILE" \
-              -F "caption=🎬 ${{ github.event.inputs.url }}"
+              -F "caption=🎬 ${{ github.event.inputs.url }}")
+            if echo "$RESPONSE" | grep -q '"ok":true'; then
+              echo "✅ فایل اصلی ارسال شد"
+            else
+              echo "❌ خطا در ارسال فایل اصلی: $RESPONSE"
+            fi
           else
             cd parts
             total=$total_parts
@@ -96,10 +117,13 @@ jobs:
                 RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
                   -F "document=@$part" \
                   -F "caption=🎬 ${{ github.event.inputs.url }} - Part $count/$total")
-                if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
+                if echo "$RESPONSE" | grep -q '"ok":true'; then
+                  echo "✅ $part ارسال شد"
                   break
+                else
+                  echo "⚠️ تلاش $attempt ناموفق: $RESPONSE"
+                  sleep 2
                 fi
-                sleep 2
               done
               count=$((count + 1))
               sleep 1
