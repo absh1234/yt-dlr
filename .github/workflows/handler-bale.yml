@@ -1,51 +1,55 @@
-name: 🤖 Bale Bot - Command Listener
+name: 🤖 Bale Bot - Universal Downloader
 
 on:
   schedule:
-    - cron: '*/2 * * * *'   # هر ۲ دقیقه
+    - cron: '*/2 * * * *'
   workflow_dispatch:
 
 jobs:
   check-messages:
     runs-on: ubuntu-latest
     steps:
-      - name: Get updates from Bale
+      - name: دریافت پیام‌های جدید
         id: get_updates
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           OFFSET_FILE="/tmp/bale_offset"
           offset=0
-          if [ -f "$OFFSET_FILE" ]; then
-            offset=$(cat "$OFFSET_FILE")
-          fi
+          [ -f "$OFFSET_FILE" ] && offset=$(cat "$OFFSET_FILE")
           RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5")
           echo "response=$RESPONSE" >> $GITHUB_OUTPUT
 
-      - name: Process commands
+      - name: پردازش فرمان‌ها
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           RESPONSE='${{ steps.get_updates.outputs.response }}'
-          echo "$RESPONSE" | jq -c '.result[]' | while read -r update; do
+          echo "$RESPONSE" | jq -c '.result[]' 2>/dev/null | while read -r update; do
             CHAT_ID=$(echo "$update" | jq -r '.message.chat.id')
             TEXT=$(echo "$update" | jq -r '.message.text // empty')
             UPDATE_ID=$(echo "$update" | jq -r '.update_id')
-
-            # ذخیره آخرین offset برای فراخوانی بعدی
             echo "$UPDATE_ID" > /tmp/bale_offset
 
+            # فرمان دانلود یوتیوب
             if [[ "$TEXT" =~ ^/download\ (https?://[^\ ]+) ]]; then
               URL="${BASH_REMATCH[1]}"
-              echo "درخواست دانلود از $CHAT_ID: $URL"
-
-              # فراخوانی workflow اصلی
+              echo "فراخوانی یوتیوب دانلودر برای: $URL"
               curl -s -X POST \
                 -H "Accept: application/vnd.github.v3+json" \
                 -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
                 https://api.github.com/repos/${{ github.repository }}/actions/workflows/yt-downloader.yml/dispatches \
                 -d '{"ref":"main","inputs":{"url":"'"$URL"'"}}'
-              
-              # اطلاع به کاربر
-              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=✅ درخواست دریافت شد. به‌محض آماده‌شدن، لینک ارسال خواهد شد."
+              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=✅ درخواست دانلود ویدیو دریافت شد. به‌محض آماده‌شدن، لینک ارسال می‌شود."
+
+            # فرمان دانلود ریلیز
+            elif [[ "$TEXT" =~ ^/release\ ([^\ ]+)\ ([^\ ]+) ]]; then
+              REPO="${BASH_REMATCH[1]}"
+              ASSET="${BASH_REMATCH[2]}"
+              echo "فراخوانی ریلیز دانلودر برای: $REPO / $ASSET"
+              curl -s -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+                https://api.github.com/repos/${{ github.repository }}/actions/workflows/release-downloader.yml/dispatches \
+                -d "{\"ref\":\"main\",\"inputs\":{\"repo\":\"${REPO}\",\"asset_name\":\"${ASSET}\"}}"
+              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=✅ درخواست دانلود فایل دریافت شد. لینک به‌زودی ارسال می‌شود."
             fi
           done
