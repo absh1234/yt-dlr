@@ -32,7 +32,16 @@ jobs:
       - name: پردازش پیام‌ها و فرمان‌ها
         id: process
         run: |
-          python3 process_updates.py   # اسکریپت پایتون برای مدیریت state و inline
+          # ایجاد فایل state در صورت عدم وجود
+          if [ ! -f bale_state.json ]; then
+            echo '{}' > bale_state.json
+          fi
+          # اگر پیامی نبود اجرا نشود
+          if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json)" = "0" ]; then
+            echo "هیچ پیام جدیدی نیست."
+            exit 0
+          fi
+          python3 process_updates.py
         env:
           BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -43,9 +52,9 @@ jobs:
         if: always()
         run: |
           git add bale_state.json .bale_offset 2>/dev/null
-          if git diff --staged --quiet; then
-            echo "هیچ تغییری برای commit وجود ندارد."
-          else
-            git commit -m "Update bot state [skip ci]"
+          if ! git diff --staged --quiet; then
+            git commit -m "ربات: بروزرسانی وضعیت [skip ci]"
             git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main
+          else
+            echo "بدون تغییر"
           fi
