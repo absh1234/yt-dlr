@@ -1,8 +1,8 @@
-name: 🤖 Bale Interactive Bot
+name: 🤖 Bale Interactive Bot (Self-Healing)
 
 on:
   schedule:
-    - cron: '* * * * *'
+    - cron: '* * * * *'   # هر ۱ دقیقه
   workflow_dispatch:
 
 jobs:
@@ -11,17 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}   # برای commit کردن state
+          token: ${{ secrets.GH_PAT }}
 
-      - name: نصب وابستگی‌های پایتون
-        run: pip3 install requests
-
-      - name: Setup Git
-        run: |
-          git config user.email "bot@github"
-          git config user.name "Bale Bot"
+      - name: نصب وابستگی‌ها
+        run: pip3 install --user requests || echo "نصب requests شکست خورد"
 
       - name: دریافت آپدیت‌ها
+        id: fetch
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           OFFSET_FILE=".bale_offset"
@@ -29,34 +25,34 @@ jobs:
           [ -f "$OFFSET_FILE" ] && offset=$(cat "$OFFSET_FILE")
           RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5")
           echo "$RESPONSE" > updates.json
-          # آخرین update_id را ذخیره کن
           jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE"
+        continue-on-error: true
 
-      - name: پردازش پیام‌ها و callbackها
+      - name: پردازش پیام‌ها (با مدیریت خطا)
         id: process
         run: |
-          # ایجاد فایل state اگر وجود ندارد
-          if [ ! -f bale_state.json ]; then
-            echo '{}' > bale_state.json
-          fi
-          # اگر هیچ آپدیتی نبود، خارج شو
+          export PATH="$HOME/.local/bin:$PATH"
+          # اطمینان از وجود فایل state
+          [ ! -f bale_state.json ] && echo '{}' > bale_state.json
+          # اگر پیامی نیست، بی‌صدا خارج شو
           if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json)" = "0" ]; then
-            echo "هیچ پیام جدیدی نیست."
             exit 0
           fi
-          python3 process_updates.py
-        env:
-          BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          REPO: ${{ github.repository }}
-          GUARDNET_KEY: ${{ secrets.GUARDNET_API_KEY }}
-      - name: Commit state changes
-        if: always()
+          # اجرای پردازش و ثبت خطا در فایل
+          python3 process_updates.py 2> error.log || true
+          if [ -s error.log ]; then
+            # خطاها را برای کاربر بفرست
+            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطایی رخ داد: $(cat error.log)" | head -c 500)"
+          fi
+        continue-on-error: true
+
+      - name: ذخیره وضعیت (بدون توقف)
         run: |
           git config user.email "actions@github.com"
-          git config user.name "GitHub Actions"
+          git config user.name "Actions Bot"
           git add bale_state.json .bale_offset 2>/dev/null
           if ! git diff --staged --quiet; then
-            git commit -m "ربات: بروزرسانی وضعیت [skip ci]"
-            git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main
+            git commit -m "ربات: بروزرسانی وضعیت [skip ci]" || true
+            git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main || true
           fi
+        continue-on-error: true
