@@ -1,113 +1,69 @@
-name: 🎬 YouTube Downloader → Guardnet
+name: 🎬 YouTube to Guardnet
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک ویدیو یوتیوب'
         required: true
       quality:
-        description: 'کیفیت (best, 720p, audio)'
         required: true
         default: 'best'
       chat_id:
-        description: 'شناسه کاربری که لینک نهایی به آن ارسال شود'
         required: true
 
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # ---------- کش ابزارها ----------
       - name: Cache tools
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v4
+          key: tools-${{ runner.os }}-v5
 
-      - name: Get yt-dlp
+      - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Get Xray core
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Setup Xray (if needed)
+        if: steps.cache.outputs.cache-hit != 'true' && secrets.XRAY_CONFIG != ''
         run: |
           curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
           unzip xray.zip -d ~/tools/xray
           chmod +x ~/tools/xray/xray
 
-      - name: Get ffmpeg
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
-          tar xf ffmpeg.tar.xz
-          mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-*-amd64-static/ffprobe ~/tools/
-          chmod +x ~/tools/ffmpeg ~/tools/ffprobe
-
-      - name: Add tools to PATH
+      - name: Add to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ---------- پروکسی (در صورت وجود کانفیگ) ----------
-      - name: Setup Xray proxy
+      - name: Run proxy if configured
         if: secrets.XRAY_CONFIG != ''
         run: |
           echo '${{ secrets.XRAY_CONFIG }}' > config.json
           ~/tools/xray/xray run -config config.json &
           sleep 2
-          echo "پروکسی فعال شد."
 
-      # ---------- دانلود بر اساس کیفیت ----------
       - name: Download video/audio
         run: |
           PROXY=""
           [ -n "${{ secrets.XRAY_CONFIG }}" ] && PROXY="--proxy socks5://127.0.0.1:10808"
-
-          case "${{ github.event.inputs.quality }}" in
-            best)
-              yt-dlp $PROXY -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best" -o "video.%(ext)s" "${{ github.event.inputs.url }}"
-              ;;
-            720p)
-              yt-dlp $PROXY -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]" -o "video.%(ext)s" "${{ github.event.inputs.url }}"
-              ;;
-            audio)
-              yt-dlp $PROXY -f "bestaudio[ext=m4a]/bestaudio" --extract-audio --audio-format mp3 -o "audio.%(ext)s" "${{ github.event.inputs.url }}"
-              ;;
+          case "${{ inputs.quality }}" in
+            best) yt-dlp $PROXY -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+            720p) yt-dlp $PROXY -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+            audio) yt-dlp $PROXY -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
           esac
-
-      - name: Find downloaded file
-        run: |
-          FILE=$(ls video.* audio.* 2>/dev/null | head -n 1)
-          if [ -z "$FILE" ]; then
-            echo "❌ دانلود شکست خورد"
-            exit 1
-          fi
+          FILE=$(ls media.* 2>/dev/null | head -n 1)
+          if [ -z "$FILE" ]; then echo "دانلود نشد"; exit 1; fi
           echo "FILE=$FILE" >> $GITHUB_ENV
 
-      # ---------- تبدیل WebM به MP4 در صورت نیاز (فقط برای ویدیو) ----------
-      - name: Convert to MP4 if needed
-        if: github.event.inputs.quality != 'audio' && ! endsWith(env.FILE, '.mp4')
+      - name: Upload to Guardnet
         run: |
-          ffmpeg -i "$FILE" -c:v libx264 -preset ultrafast -crf 30 -c:a aac -b:a 128k -movflags +faststart converted.mp4
-          echo "FILE=converted.mp4" >> $GITHUB_ENV
-
-      # ---------- آپلود روی گاردنت و ارسال لینک ----------
-      - name: Upload to Guardnet and notify
-        run: |
-          API_KEY="${{ secrets.GUARDNET_API_KEY }}"
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
-          CHAT_ID="${{ github.event.inputs.chat_id }}"
-
-          RESPONSE=$(curl -s -X POST "https://guardnet.ir/api/files/upload" \
-            -H "Authorization: Bearer ${API_KEY}" \
+          RESP=$(curl -s -X POST "https://guardnet.ir/api/files/upload" \
+            -H "Authorization: Bearer ${{ secrets.GUARDNET_API_KEY }}" \
             -F "file=@${FILE}")
-          URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-          if [ -z "$URL" ]; then
-            echo "❌ خطای آپلود: $RESPONSE"
-            exit 1
-          fi
-          echo "✅ لینک: $URL"
-          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "🎬 دانلود آماده شد!\n📥 $URL" | jq -sRr @uri)"
+          URL=$(echo "$RESP" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$URL" ]; then echo "Upload failed: $RESP"; exit 1; fi
+          curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.chat_id }}&text=$(echo "🎬 دانلود شد\n📥 $URL" | jq -sRr @uri)"
