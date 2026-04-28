@@ -1,4 +1,4 @@
-name: 📦 Release to Bale (Direct)
+name: 📦 Release to Bale (Robust)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         required: true
 
 jobs:
-  release-to-bale:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: دانلود
@@ -23,34 +23,48 @@ jobs:
           out-file-path: ./files
 
       - name: فشرده‌سازی
-        run: cd files && zip -r ../archive.zip ./* && cd ..
+        run: |
+          cd files && zip -r ../archive.zip ./* && cd ..
+          echo "SIZE=$(stat -c%s archive.zip)" >> $GITHUB_ENV
 
-      - name: ارسال به بله (با پارتیشن‌بندی خودکار)
+      - name: ارسال (تکی یا پارتیشن‌بندی)
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          SIZE=$(stat -c%s archive.zip)
-          if [ "$SIZE" -le 47185920 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "📦 ${{ inputs.repo }}" | jq -sRr @uri)" \
-              -F "document=@archive.zip"
+          if [ "$SIZE" -le 45000000 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+              -F "document=@archive.zip" \
+              -F "caption=📦 ${{ inputs.repo }}"
           else
             mkdir parts && cd parts
             split -b 45M ../archive.zip part_
             a=1
-            for f in part_*; do mv "$f" "part_${a}.zip"; a=$((a+1)); done
+            for f in part_*; do
+              mv "$f" $(printf "part_%03d.zip" $a)
+              a=$((a+1))
+            done
             total=$(ls part_*.zip | wc -l)
             count=1
             for part in part_*.zip; do
-              for attempt in 1 2 3; do
-                RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(echo "📦 ${{ inputs.repo }} - Part $count/$total" | jq -sRr @uri)" \
-                  -F "document=@$part")
-                if echo "$RESPONSE" | grep -q '"ok":true'; then break; fi
-                sleep 2
+              success=0
+              for attempt in 1 2 3 4 5; do
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
+                  -F "document=@$part" \
+                  -F "caption=📦 ${{ inputs.repo }} - Part $count/$total")
+                if echo "$RESP" | grep -q '"ok":true'; then
+                  success=1
+                  break
+                fi
+                sleep 3
               done
+              if [ $success -eq 0 ]; then
+                # ارسال پیام هشدار در صورت عدم موفقیت یک پارت
+                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ ارسال پارت $count ناموفق بود"
+              fi
               count=$((count+1))
-              sleep 1
+              sleep 2
             done
-            # ارسال دستور ادغام
-            MERGE_CMD="copy /b $(ls part_*.zip | tr '\n' '+' | sed 's/+$//') full_archive.zip"
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
+            # دستور ادغام
+            MERGE="copy /b part_*.zip full_archive.zip"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE" | jq -sRr @uri)"
           fi
