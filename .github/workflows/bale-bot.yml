@@ -63,18 +63,27 @@ jobs:
         continue-on-error: true
 
       # ========== گام ۴: ذخیره وضعیت (همیشه موفق) ==========
-      - name: Commit and push state files
+      - name: 💾 ذخیره وضعیت و push به مخزن
         run: |
+          # تنظیم Git (حتی اگر تنظیم نباشد، ادامه بده)
           git config user.email "actions@github.com" || true
           git config user.name "GitHub Actions" || true
-          git add bale_state.json .bale_offset 2>/dev/null || true
+
+          # اضافه کردن فایل‌های تغییر یافته
+          git add bale_state.json .bale_offset 2>/dev/null
+
+          # اگر تغییری نبود، نیازی به commit نیست
           if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "ربات: بروزرسانی وضعیت [skip ci]" || true
-            git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main || true
+            echo "بدون تغییر، خارج می‌شویم."
+            exit 0
           fi
-        continue-on-error: true
+
+          # commit با پیغام (بدون [skip ci] تا کرون‌ها تحت تأثیر قرار نگیرند)
+          git commit -m "ربات: بروزرسانی وضعیت"
+
+          # برای جلوگیری از تداخل، ابتدا pull کن و سپس push کن
+          git pull --rebase https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git main
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main
 
       # ========== گام ۵: تضمین سبز بودن Job ==========
       - name: Final success marker
