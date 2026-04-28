@@ -1,70 +1,112 @@
-name: 📦 Release to Bale (Robust)
+name: 📦 Release Downloader & Sender to Bale
 
 on:
   workflow_dispatch:
     inputs:
       repo:
+        description: 'نام مخزن (owner/repo)'
         required: true
       asset_name:
+        description: 'نام فایل (مثلاً stockfish-windows-x86-64-modern.zip یا *)'
         required: true
+        default: '*'
       tag:
+        description: 'تگ نسخه (برای آخرین نسخه خالی بگذارید)'
+        required: false
+        default: ''
+      target_chat_id:
+        description: 'شناسه کاربر دریافت‌کننده فایل'
         required: true
 
 jobs:
-  release:
+  release-to-bale:
     runs-on: ubuntu-latest
     steps:
-      - name: دانلود
+      - name: 📢 اطلاع شروع
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "📥 شروع دانلود ${{ inputs.asset_name }} از ${{ inputs.repo }}" | jq -sRr @uri)"
+
+      - name: ⬇️ دانلود از ریلیز
         uses: robinraju/release-downloader@v1.13
         with:
           repository: ${{ inputs.repo }}
           fileName: ${{ inputs.asset_name }}
           tag: ${{ inputs.tag }}
-          out-file-path: ./files
+          latest: ${{ inputs.tag == '' }}
+          out-file-path: './files'
 
-      - name: فشرده‌سازی
-        run: |
-          cd files && zip -r ../archive.zip ./* && cd ..
-          echo "SIZE=$(stat -c%s archive.zip)" >> $GITHUB_ENV
-
-      - name: ارسال (تکی یا پارتیشن‌بندی)
+      - name: 📋 گزارش پایان دانلود
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
-          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          if [ "$SIZE" -le 45000000 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
-              -F "document=@archive.zip" \
-              -F "caption=📦 ${{ inputs.repo }}"
+          if [ -d files ] && [ "$(ls -A files)" ]; then
+            FILE_LIST=$(ls files/ | tr '\n' ' ')
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "✅ دانلود کامل شد. فایل‌ها: ${FILE_LIST}" | jq -sRr @uri)"
           else
-            mkdir parts && cd parts
-            split -b 45M ../archive.zip part_
-            a=1
-            for f in part_*; do
-              mv "$f" $(printf "part_%03d.zip" $a)
-              a=$((a+1))
-            done
-            total=$(ls part_*.zip | wc -l)
-            count=1
-            for part in part_*.zip; do
-              success=0
-              for attempt in 1 2 3 4 5; do
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}" \
-                  -F "document=@$part" \
-                  -F "caption=📦 ${{ inputs.repo }} - Part $count/$total")
-                if echo "$RESP" | grep -q '"ok":true'; then
-                  success=1
-                  break
-                fi
-                sleep 3
-              done
-              if [ $success -eq 0 ]; then
-                # ارسال پیام هشدار در صورت عدم موفقیت یک پارت
-                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ ارسال پارت $count ناموفق بود"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "❌ هیچ فایلی دانلود نشد!" | jq -sRr @uri)"
+            exit 1
+          fi
+
+      - name: 🗜️ ساخت فایل ZIP
+        run: |
+          cd files && zip -r ../archive.zip ./* && cd ..
+          SIZE=$(stat -c%s archive.zip)
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
+
+      - name: 📊 گزارش حجم
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "🗜️ ZIP آماده (حجم: ${SIZE_MB} MB)" | jq -sRr @uri)"
+
+      - name: 📮 ارسال مستقیم (≤ 45MB)
+        if: env.SIZE <= 47185920
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
+            -F "document=@archive.zip" \
+            -F "caption=📦 فایل ${{ inputs.asset_name }} از ${{ inputs.repo }}"
+
+      - name: 📦 ارسال پارتیشن‌بندی شده (بیش از 45MB)
+        if: env.SIZE > 47185920
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          mkdir parts && cd parts
+          split -b 45M ../archive.zip part_
+          a=1
+          for f in part_*; do
+            mv "$f" $(printf "part_%03d.zip" $a)
+            a=$((a + 1))
+          done
+          total=$(ls part_*.zip | wc -l)
+          count=1
+          for part in part_*.zip; do
+            success=0
+            for attempt in 1 2 3 4 5; do
+              RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
+                -F "document=@$part" \
+                -F "caption=📦 ${{ inputs.repo }} - پارت $count از $total")
+              if echo "$RESP" | grep -q '"ok":true'; then
+                success=1; break
               fi
-              count=$((count+1))
-              sleep 2
+              sleep 4
             done
-            # دستور ادغام
-            MERGE="copy /b part_*.zip full_archive.zip"
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "$MERGE" | jq -sRr @uri)"
+            if [ $success -eq 0 ]; then
+              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=⚠️ خطا در ارسال پارت $count"
+            fi
+            count=$((count + 1))
+            sleep 3
+          done
+          cd ..
+          MERGE_CMD="copy /b parts\\part_*.zip full_archive.zip"
+          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "$MERGE_CMD" | jq -sRr @uri)"
+
+      - name: 🏁 گزارش نهایی
+        if: always()
+        run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          if [ "${{ job.status }}" = "success" ]; then
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات با موفقیت کامل شد."
+          else
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی رخ داد."
           fi
