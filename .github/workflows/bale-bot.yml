@@ -1,4 +1,4 @@
-name: 🤖 Bale Interactive Bot (Never Fail)
+name: 🤖 Bale Bot (Persistent)
 
 on:
   schedule:
@@ -8,46 +8,36 @@ on:
 jobs:
   bot:
     runs-on: ubuntu-latest
-    # تضمین موفقیت کلی job حتی با وجود خطاهای مرحله‌ها
+    # اگر هم خطایی رخ داد، job قرمز نشود (برای پایداری)
     continue-on-error: true
     steps:
-      # ========== گام ۰: دریافت سورس (بدون خطا) ==========
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
-        continue-on-error: true
 
-      # ========== گام ۱: نصب وابستگی‌ها (امن) ==========
-      - name: Install Python dependencies
-        run: pip3 install --user requests || echo "نصب ناموفق بود، ادامه می‌دهیم"
-        continue-on-error: true
+      - name: نصب requests
+        run: pip3 install --user requests || true
 
-      # ========== گام ۲: دریافت آپدیت‌ها ==========
-      - name: Fetch updates from Bale
-        id: fetch
+      - name: دریافت آپدیت‌های جدید
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           OFFSET_FILE=".bale_offset"
           offset=0
           [ -f "$OFFSET_FILE" ] && offset=$(cat "$OFFSET_FILE")
-          RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&timeout=5") || true
+          # دریافت تا ۱۰ آپدیت جدید
+          RESPONSE=$(curl -s "https://tapi.bale.ai/bot${TOKEN}/getUpdates?offset=$((offset+1))&limit=10&timeout=5" || true)
           echo "$RESPONSE" > updates.json
-          jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE" || true
+          # ذخیره آخرین update_id دریافتی (مهم)
+          jq -r '.result[-1].update_id // empty' updates.json > "$OFFSET_FILE"
         continue-on-error: true
 
-      # ========== گام ۳: پردازش هوشمند با گزارش خطا به خود ربات ==========
-      - name: Process messages & callbacks (with self-reporting errors)
-        id: process
+      - name: پردازش پیام‌ها و callbackها
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           [ ! -f bale_state.json ] && echo '{}' > bale_state.json
-
           if [ ! -f updates.json ] || [ "$(jq '.result | length' updates.json 2>/dev/null || echo 0)" = "0" ]; then
-            echo "No new messages."
             exit 0
           fi
-
           python3 process_updates.py \
             --token "${{ secrets.BALE_BOT_TOKEN }}" \
             --gh_pat "${{ secrets.GH_PAT }}" \
@@ -55,36 +45,19 @@ jobs:
             --guardnet_key "${{ secrets.GUARDNET_API_KEY }}" \
             --chat_id "${{ secrets.BALE_CHAT_ID }}" \
             2> error.log || true
-
           if [ -s error.log ]; then
-            ERROR_MSG=$(head -c 400 error.log | sed 's/"/\\"/g')
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطا در پردازش: ${ERROR_MSG}" | jq -sRr @uri)" || true
+            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.BALE_CHAT_ID }}&text=$(echo "⚠️ خطا: $(head -c 300 error.log)" | jq -sRr @uri)" || true
           fi
         continue-on-error: true
 
-      # ========== گام ۴: ذخیره وضعیت (همیشه موفق) ==========
-      - name: 💾 ذخیره وضعیت و push به مخزن
+      - name: ذخیره وضعیت در مخزن (تضمین‌شده)
         run: |
-          # تنظیم Git (حتی اگر تنظیم نباشد، ادامه بده)
           git config user.email "actions@github.com" || true
-          git config user.name "GitHub Actions" || true
-
-          # اضافه کردن فایل‌های تغییر یافته
-          git add bale_state.json .bale_offset 2>/dev/null
-
-          # اگر تغییری نبود، نیازی به commit نیست
+          git config user.name "Actions Bot" || true
+          git add bale_state.json .bale_offset
           if git diff --staged --quiet; then
-            echo "بدون تغییر، خارج می‌شویم."
             exit 0
           fi
-
-          # commit با پیغام (بدون [skip ci] تا کرون‌ها تحت تأثیر قرار نگیرند)
-          git commit -m "ربات: بروزرسانی وضعیت"
-
-          # برای جلوگیری از تداخل، ابتدا pull کن و سپس push کن
+          git commit -m "ربات: بروزرسانی offset و state"
           git pull --rebase https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git main
           git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git HEAD:main
-
-      # ========== گام ۵: تضمین سبز بودن Job ==========
-      - name: Final success marker
-        run: echo "✅ ربات اجرای خود را با موفقیت (بدون توقف) به پایان رساند."
