@@ -20,98 +20,58 @@ jobs:
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
     steps:
-      # ========== کش ابزارها (فقط yt-dlp و wgcf) ==========
-      - name: Cache tools
-        id: cache-tools
+      - name: Cache yt-dlp
+        id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-wgcf-v4
+          key: tools-${{ runner.os }}-v1
 
-      - name: Install yt-dlp (if not cached)
-        if: steps.cache-tools.outputs.cache-hit != 'true'
+      - name: Setup yt-dlp
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Install wgcf (if not cached)
-        if: steps.cache-tools.outputs.cache-hit != 'true'
-        run: |
-          curl -L https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_amd64 -o ~/tools/wgcf
-          chmod +x ~/tools/wgcf
-
-      - name: Add tools to PATH
+      - name: Add to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ========== نصب WireGuard ==========
-      - name: Install WireGuard
+      - name: Download from YouTube
         run: |
-          if ! command -v wg-quick &> /dev/null; then
-            sudo apt-get update && sudo apt-get install wireguard-tools -y
-          else
-            echo "WireGuard already installed."
-          fi
-
-      # ========== راه‌اندازی Cloudflare WARP ==========
-      - name: Register & connect to Cloudflare WARP
-        run: |
-          mkdir -p ~/.wgcf
-          cd ~/.wgcf
-          # اگر فایل اکانت وجود نداشت ثبت‌نام کن
-          if [ ! -f wgcf-account.toml ]; then
-            ~/tools/wgcf register --accept-tos
-            ~/tools/wgcf generate
-          fi
-          sudo wg-quick up wgcf-profile.conf
-          echo "WARP active."
-
-      # ========== دانلود ویدیو ==========
-      - name: Download media from YouTube
-        run: |
-          echo "Downloading via Cloudflare WARP..."
-          case "${{ inputs.quality }}" in
-            best)
-              yt-dlp -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
-            720p)
-              yt-dlp -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
-            audio)
-              yt-dlp -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
-          esac
+          # تنظیمات ویژه برای دور زدن تحریم
+          yt-dlp \
+            --extractor-args "youtube:player_client=ios" \
+            --no-check-certificate \
+            --user-agent "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1" \
+            -f "bestvideo[height<=720]+bestaudio/best[height<=720]" \
+            -o "media.%(ext)s" \
+            "${{ inputs.url }}"
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
-          if [ -z "$FILE" ]; then
-            echo "❌ دانلود ناموفق بود."
-            exit 1
-          fi
+          [ -z "$FILE" ] && echo "دانلود ناموفق" && exit 1
           echo "FILE=$FILE" >> $GITHUB_ENV
           SIZE=$(stat -c%s "$FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
 
-      # ========== تقسیم و ارسال ==========
-      - name: Split and send media parts
+      - name: Split and send to Bale
         run: |
           TOKEN="${BALE_TOKEN}"
           CHAT_ID="${{ inputs.target_chat_id }}"
           FILE="${FILE}"
           SIZE="${SIZE}"
-          QUALITY="${{ inputs.quality }}"
 
           if [ "$SIZE" -le 10485760 ]; then
-            if [ "$QUALITY" = "audio" ]; then
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی شما"
-            else
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
-            fi
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+              -F "video=@${FILE}" \
+              -F "caption=🎬 ویدیوی شما"
             exit 0
           fi
 
+          # تقسیم ویدیو
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
-          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
-          TARGET_SIZE_BIT=75497472
-          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
+          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / ${DURATION}))")
+          SEG_TIME=$(python3 -c "print(round(75497472 / ${BITRATE} * 0.95, 2))")
           EXT="${FILE##*.}"
 
           mkdir parts && cd parts
@@ -121,29 +81,22 @@ jobs:
           TOTAL=$(ls part_*.${EXT} | wc -l)
           COUNT=1
           for PART in part_*.${EXT}; do
-            SUCCESS=0
             for ATTEMPT in 1 2 3 4 5; do
-              if [ "$QUALITY" = "audio" ]; then
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
-              else
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
-              fi
-              if echo "$RESP" | grep -q '"ok":true'; then SUCCESS=1; break; fi
+              RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                -F "video=@${PART}" \
+                -F "caption=🎬 پارت ${COUNT}/${TOTAL}")
+              echo "$RESP" | grep -q '"ok":true' && break
               sleep 4
             done
-            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
             COUNT=$((COUNT + 1))
             sleep 2
           done
 
-      # ========== گزارش نهایی ==========
-      - name: Final report
+      - name: Report
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات دانلود و ارسال با موفقیت کامل شد."
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ دانلود و ارسال با موفقیت انجام شد."
           else
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطا در عملیات."
           fi
