@@ -20,25 +20,23 @@ jobs:
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
     steps:
-      # ========== کش کامل (ابزارها + اکانت Warp) ==========
-      - name: Cache tools & warp account
-        id: cache-all
+      # ========== کش ابزارها (فقط yt-dlp و wgcf) ==========
+      - name: Cache tools
+        id: cache-tools
         uses: actions/cache@v4
         with:
-          path: |
-            ~/tools
-            ~/.wgcf
-          key: warp-tools-${{ runner.os }}-v3
+          path: ~/tools
+          key: tools-${{ runner.os }}-wgcf-v4
 
       - name: Install yt-dlp (if not cached)
-        if: steps.cache-all.outputs.cache-hit != 'true'
+        if: steps.cache-tools.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
       - name: Install wgcf (if not cached)
-        if: steps.cache-all.outputs.cache-hit != 'true'
+        if: steps.cache-tools.outputs.cache-hit != 'true'
         run: |
           curl -L https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_amd64 -o ~/tools/wgcf
           chmod +x ~/tools/wgcf
@@ -46,7 +44,8 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      - name: Install WireGuard (only if missing)
+      # ========== نصب WireGuard ==========
+      - name: Install WireGuard
         run: |
           if ! command -v wg-quick &> /dev/null; then
             sudo apt-get update && sudo apt-get install wireguard-tools -y
@@ -54,19 +53,19 @@ jobs:
             echo "WireGuard already installed."
           fi
 
-      # ========== راه‌اندازی Warp (فقط در صورت عدم وجود اکانت) ==========
+      # ========== راه‌اندازی Cloudflare WARP ==========
       - name: Register & connect to Cloudflare WARP
         run: |
+          mkdir -p ~/.wgcf
           cd ~/.wgcf
-          # اگر فایل اکانت وجود نداشت، ثبت‌نام کن
+          # اگر فایل اکانت وجود نداشت ثبت‌نام کن
           if [ ! -f wgcf-account.toml ]; then
             ~/tools/wgcf register --accept-tos
             ~/tools/wgcf generate
           fi
-          # فعال‌سازی تانل
           sudo wg-quick up wgcf-profile.conf
-          echo "WARP is active."
-          
+          echo "WARP active."
+
       # ========== دانلود ویدیو ==========
       - name: Download media from YouTube
         run: |
