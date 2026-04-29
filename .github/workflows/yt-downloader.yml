@@ -50,17 +50,28 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ----- پیکربندی پروکسی با اسکریپت خارجی -----
-      - name: Generate Xray config from subscription
-        if: env.SUB_URL != ''
+      # =============== تولید config.json با قابلیت fallback ===============
+      - name: Prepare Xray config (subscription or manual)
+        if: env.SUB_URL != '' || env.XRAY_CONFIG != ''
         run: |
-          python3 .github/scripts/sub2config.py "$SUB_URL" config.json
+          if [ -n "$SUB_URL" ]; then
+            echo "Attempting subscription…"
+            if python3 .github/scripts/sub2config.py "$SUB_URL" config.json 2>/dev/null; then
+              echo "✅ Subscription config generated"
+            else
+              echo "⚠️ Subscription failed, falling back to manual config"
+              echo "$XRAY_CONFIG" > config.json
+            fi
+          else
+            echo "$XRAY_CONFIG" > config.json
+          fi
+          # امنیت: اگر فایل ساخته نشده بود، خروج خطا
+          if [ ! -s config.json ]; then
+            echo "❌ No config available"
+            exit 1
+          fi
 
-      - name: Use manual Xray config
-        if: env.SUB_URL == '' && env.XRAY_CONFIG != ''
-        run: |
-          echo "$XRAY_CONFIG" > config.json
-
+      # =============== راه‌اندازی پروکسی ===============
       - name: Run Xray proxy
         if: env.XRAY_CONFIG != '' || env.SUB_URL != ''
         run: |
