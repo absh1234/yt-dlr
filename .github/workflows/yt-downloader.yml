@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v12
+          key: tools-${{ runner.os }}-v13
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -46,28 +46,103 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      - name: Generate Xray config from subscription
-        id: proxy_config
-        if: env.SUB_URL != '' || env.XRAY_CONFIG != ''
+      - name: Generate Xray config & run proxy
+        if: env.XRAY_CONFIG != '' || env.SUB_URL != ''
         run: |
+          # ---- Build config.json ----
           if [ -n "$SUB_URL" ]; then
-            python3 .github/scripts/sub2config.py "$SUB_URL" config.json
-          else
-            echo "$XRAY_CONFIG" > config.json
-          fi
-        shell: bash
+            python3 - "$SUB_URL" config.json << 'PYEOF'
+      import sys, base64, json, re, urllib.request, socket, time, urllib.parse
 
-      - name: Run Xray proxy
-        if: steps.proxy_config.conclusion == 'success'
-        run: |
+      SUB_URL = sys.argv[1]
+      OUT = sys.argv[2]
+
+      def fetch(url):
+          with urllib.request.urlopen(url, timeout=15) as r:
+              data = r.read().decode('utf-8').strip()
+              try: return base64.b64decode(data).decode('utf-8').strip()
+              except: return data
+
+      def parse_nodes(text):
+          n = []
+          for l in text.splitlines():
+              l = l.strip()
+              if l.startswith('vmess://'): n.append(('vmess', l[8:]))
+              elif l.startswith('vless://'): n.append(('vless', l[8:]))
+              elif l.startswith('trojan://'): n.append(('trojan', l[9:]))
+          return n
+
+      def parse_vmess(e):
+          try:
+              j = json.loads(base64.b64decode(e).decode())
+              return {'addr': j['add'], 'port': int(j['port']), 'uuid': j['id'],
+                      'net': j.get('net','tcp'), 'path': j.get('path','/'),
+                      'host': j.get('host',''), 'tls': j.get('tls',''),
+                      'sni': j.get('sni', j['add'])}
+          except: return None
+
+      def test(host, port, to=2):
+          try:
+              s = socket.socket(); s.settimeout(to)
+              t0 = time.time()
+              if s.connect_ex((host, port)) == 0:
+                  return time.time() - t0
+          except: pass
+          return None
+
+      def build(proto, n):
+          out = {
+              "log": {"loglevel": "warning"},
+              "inbounds": [{"port": 10808, "protocol": "socks",
+                            "settings": {"auth": "noauth", "udp": True}}]
+          }
+          if proto == 'vmess':
+              ob = {"protocol": "vmess", "settings": {"vnext": [{
+                  "address": n['addr'], "port": n['port'],
+                  "users": [{"id": n['uuid'], "security": "auto"}]}]},
+                  "streamSettings": {"network": n['net'], "security": n.get('tls','none')}}
+              if n['net'] == 'ws':
+                  ob['streamSettings']['wsSettings'] = {"path": n['path'],
+                      "headers": {"Host": n['host']}}
+              if n.get('tls'):
+                  ob['streamSettings']['tlsSettings'] = {"serverName": n.get('sni','')}
+          elif proto == 'vless':
+              ob = {"protocol": "vless", "settings": {"vnext": [{
+                  "address": n['addr'], "port": n['port'],
+                  "users": [{"id": n['uuid'], "encryption": "none"}]}]},
+                  "streamSettings": {"network": 'tcp', "security": "none"}}
+          elif proto == 'trojan':
+              ob = {"protocol": "trojan", "settings": {"servers": [{
+                  "address": n['addr'], "port": n['port'],
+                  "password": n['uuid']}]},
+                  "streamSettings": {"network": "tcp", "security": "tls",
+                  "tlsSettings": {"serverName": n.get('sni', n['addr'])}}}
+          else: return None
+          out['outbounds'] = [ob]
+          return out
+
+      raw = fetch(SUB_URL)
+      nodes = parse_nodes(raw)
+      best = None; best_lat = 999
+      for proto, data in nodes:
+          if proto == 'vmess': info = parse_vmess(data)
+          else: continue
+          if not info: continue
+          lat = test(info['addr'], info['port'])
+          if lat and lat < best_lat:
+              best_lat = lat; best = (proto, info)
+      if not best: sys.exit(1)
+      cfg = build(*best)
+      with open(OUT, 'w') as f: json.dump(cfg, f, indent=2)
+      print(f"Selected {best[0]} node {best[1]['addr']}:{best[1]['port']} ({best_lat*1000:.0f}ms)")
+      PYEOF
+          else:
+            echo "$XRAY_CONFIG" > config.json
+          # ---- Run proxy ----
           ~/tools/xray/xray run -config config.json &
-          for i in {1..10}; do
-            nc -z 127.0.0.1 10808 && echo "Proxy ready" && break
-            sleep 2
-          done
+          for i in $(seq 1 10); do nc -z 127.0.0.1 10808 && break; sleep 2; done
 
       - name: Download media from YouTube
-        id: download
         run: |
           PROXY=""
           if nc -z 127.0.0.1 10808 2>/dev/null; then
@@ -76,7 +151,6 @@ jobs:
           else
             echo "No proxy, direct download"
           fi
-
           case "${{ inputs.quality }}" in
             best)
               yt-dlp $PROXY -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
@@ -85,12 +159,8 @@ jobs:
             audio)
               yt-dlp $PROXY -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
           esac
-
           FILE=$(ls media.* 2>/dev/null | head -n1)
-          if [ -z "$FILE" ]; then
-            echo "دانلود ناموفق بود."
-            exit 1
-          fi
+          if [ -z "$FILE" ]; then echo "دانلود ناموفق بود."; exit 1; fi
           echo "FILE=$FILE" >> $GITHUB_ENV
           SIZE=$(stat -c%s "$FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
@@ -102,7 +172,6 @@ jobs:
           FILE="${FILE}"
           SIZE="${SIZE}"
           QUALITY="${{ inputs.quality }}"
-
           if [ "$SIZE" -le 10485760 ]; then
             if [ "$QUALITY" = "audio" ]; then
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
@@ -113,17 +182,14 @@ jobs:
             fi
             exit 0
           fi
-
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
           BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
           TARGET_SIZE_BIT=75497472
           SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
           EXT="${FILE##*.}"
-
           mkdir parts && cd parts
           ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
             -c copy -reset_timestamps 1 "part_%03d.${EXT}"
-
           TOTAL=$(ls part_*.${EXT} | wc -l)
           COUNT=1
           for PART in part_*.${EXT}; do
