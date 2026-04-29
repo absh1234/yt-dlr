@@ -50,6 +50,19 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
+        #---------------test --------------------
+      - name: Verify proxy is working
+        if: env.XRAY_CONFIG != '' || env.SUB_URL != ''
+        run: |
+          sleep 3
+          if nc -z 127.0.0.1 10808; then
+            echo "✅ SOCKS5 proxy is listening"
+            curl --socks5 127.0.0.1:10808 -s -o /dev/null -w "HTTP %{http_code}" https://www.google.com
+          else
+            echo "❌ Proxy port not open!"
+            exit 1
+          fi
+
       # =============== تولید config.json با قابلیت fallback ===============
       - name: Prepare Xray config (subscription or manual)
         if: env.SUB_URL != '' || env.XRAY_CONFIG != ''
