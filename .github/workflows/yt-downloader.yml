@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale
+name: 🎬 YouTube Downloader to Bale (Stable via Piped)
 
 on:
   workflow_dispatch:
@@ -20,33 +20,63 @@ jobs:
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
     steps:
-      - name: Cache yt-dlp
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ~/tools
-          key: tools-${{ runner.os }}-v1
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg curl jq
 
-      - name: Setup yt-dlp
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Extract video ID and get streams
+        id: streams
         run: |
-          mkdir -p ~/tools
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
-          chmod +x ~/tools/yt-dlp
+          # Extract video ID from various YouTube URL formats
+          VIDEO_ID=$(echo "${{ inputs.url }}" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p; s/.*youtu.be\/\([^?]*\).*/\1/p; s/.*youtube.com\/embed\/\([^?]*\).*/\1/p' | tail -1)
+          [ -z "$VIDEO_ID" ] && echo "Invalid URL" && exit 1
+          echo "Video ID: $VIDEO_ID"
 
-      - name: Add to PATH
-        run: echo "$HOME/tools" >> $GITHUB_PATH
+          # Fetch streams from Piped API (pick a stable instance)
+          API="https://pipedapi.kavin.rocks/streams/${VIDEO_ID}"
+          echo "Fetching streams..."
+          STREAMS=$(curl -s "$API")
 
-      - name: Download from YouTube
+          # Select appropriate stream based on quality choice
+          if [ "${{ inputs.quality }}" = "audio" ]; then
+            # Get best audio stream (m4a or webm)
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].url')
+            EXT=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].quality' | sed 's/.*\.//')
+            [ -z "$EXT" ] && EXT="m4a"
+          elif [ "${{ inputs.quality }}" = "720p" ]; then
+            # Get video+audio combined up to 720p (if exists)
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.videoStreams | map(select(.height <= 720 and .format? == "hd720")) | sort_by(-.height) | .[0].url')
+            EXT="mp4"
+            # If no combined, fallback to best video+audio merge
+            if [ "$STREAM_URL" = "null" ]; then
+              VID_URL=$(echo "$STREAMS" | jq -r '.videoStreams | map(select(.height <= 720)) | sort_by(-.height) | .[0].url')
+              AUD_URL=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].url')
+            fi
+          else  # best
+            # Try to get best combined (sometimes available)
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.videoStreams | sort_by(-.height) | .[0].url')
+            EXT="mp4"
+            if [ "$STREAM_URL" = "null" ]; then
+              VID_URL=$(echo "$STREAMS" | jq -r '.videoStreams | sort_by(-.height) | .[0].url')
+              AUD_URL=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].url')
+            fi
+          fi
+
+          echo "STREAM_URL=$STREAM_URL" >> $GITHUB_ENV
+          echo "VID_URL=$VID_URL" >> $GITHUB_ENV
+          echo "AUD_URL=$AUD_URL" >> $GITHUB_ENV
+          echo "EXT=$EXT" >> $GITHUB_ENV
+
+      - name: Download and (if needed) merge
         run: |
-          # تنظیمات ویژه برای دور زدن تحریم
-          yt-dlp \
-            --extractor-args "youtube:player_client=ios" \
-            --no-check-certificate \
-            --user-agent "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1" \
-            -f "bestvideo[height<=720]+bestaudio/best[height<=720]" \
-            -o "media.%(ext)s" \
-            "${{ inputs.url }}"
+          if [ -n "$STREAM_URL" ] && [ "$STREAM_URL" != "null" ]; then
+            # Download single stream
+            curl -L "$STREAM_URL" -o "media.$EXT"
+          else
+            # Download video and audio separately, then merge
+            curl -L "$VID_URL" -o video.mp4
+            curl -L "$AUD_URL" -o audio.m4a
+            ffmpeg -i video.mp4 -i audio.m4a -c copy -map 0:v -map 1:a "media.mp4"
+          fi
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
           [ -z "$FILE" ] && echo "دانلود ناموفق" && exit 1
@@ -56,47 +86,57 @@ jobs:
 
       - name: Split and send to Bale
         run: |
-          TOKEN="${BALE_TOKEN}"
+          TOKEN="$BALE_TOKEN"
           CHAT_ID="${{ inputs.target_chat_id }}"
-          FILE="${FILE}"
-          SIZE="${SIZE}"
+          FILE="$FILE"
+          SIZE="$SIZE"
+          QUALITY="${{ inputs.quality }}"
 
           if [ "$SIZE" -le 10485760 ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-              -F "video=@${FILE}" \
-              -F "caption=🎬 ویدیوی شما"
+            if [ "$QUALITY" = "audio" ]; then
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی"
+            else
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
+            fi
             exit 0
           fi
 
-          # تقسیم ویدیو
+          # Split for larger files
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
-          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / ${DURATION}))")
-          SEG_TIME=$(python3 -c "print(round(75497472 / ${BITRATE} * 0.95, 2))")
+          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
+          TARGET_SIZE_BIT=75497472
+          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
           EXT="${FILE##*.}"
-
           mkdir parts && cd parts
           ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
             -c copy -reset_timestamps 1 "part_%03d.${EXT}"
-
           TOTAL=$(ls part_*.${EXT} | wc -l)
           COUNT=1
           for PART in part_*.${EXT}; do
+            SUCCESS=0
             for ATTEMPT in 1 2 3 4 5; do
-              RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                -F "video=@${PART}" \
-                -F "caption=🎬 پارت ${COUNT}/${TOTAL}")
-              echo "$RESP" | grep -q '"ok":true' && break
+              if [ "$QUALITY" = "audio" ]; then
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
+              else
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
+              fi
+              echo "$RESP" | grep -q '"ok":true' && SUCCESS=1 && break
               sleep 4
             done
+            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
             COUNT=$((COUNT + 1))
             sleep 2
           done
 
-      - name: Report
+      - name: Final report
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
             curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ دانلود و ارسال با موفقیت انجام شد."
           else
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطا در عملیات."
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
           fi
