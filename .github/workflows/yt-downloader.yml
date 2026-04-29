@@ -20,14 +20,14 @@ jobs:
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
       XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
+      SUB_URL: ${{ secrets.SUBSCRIPTION_URL }}
     steps:
-      # ================== ابزارهای اولیه ==================
       - name: Cache tools
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v11
+          key: tools-${{ runner.os }}-v12
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -36,8 +36,8 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Setup Xray (only if config provided)
-        if: steps.cache.outputs.cache-hit != 'true' && env.XRAY_CONFIG != ''
+      - name: Setup Xray
+        if: steps.cache.outputs.cache-hit != 'true' && (env.XRAY_CONFIG != '' || env.SUB_URL != '')
         run: |
           curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
           unzip xray.zip -d ~/tools/xray
@@ -46,18 +46,26 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ================== اجرای پروکسی (در صورت وجود) ==================
-      - name: Run Xray proxy
-        if: env.XRAY_CONFIG != ''
+      - name: Generate Xray config from subscription
+        id: proxy_config
+        if: env.SUB_URL != '' || env.XRAY_CONFIG != ''
         run: |
-          echo "$XRAY_CONFIG" > config.json
+          if [ -n "$SUB_URL" ]; then
+            python3 .github/scripts/sub2config.py "$SUB_URL" config.json
+          else
+            echo "$XRAY_CONFIG" > config.json
+          fi
+        shell: bash
+
+      - name: Run Xray proxy
+        if: steps.proxy_config.conclusion == 'success'
+        run: |
           ~/tools/xray/xray run -config config.json &
           for i in {1..10}; do
-            nc -z 127.0.0.1 10808 && break
+            nc -z 127.0.0.1 10808 && echo "Proxy ready" && break
             sleep 2
           done
 
-      # ================== دانلود ویدیو/صدا ==================
       - name: Download media from YouTube
         id: download
         run: |
@@ -80,16 +88,13 @@ jobs:
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
           if [ -z "$FILE" ]; then
-            echo "❌ دانلود ناموفق بود."
+            echo "دانلود ناموفق بود."
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
-          echo "File: $FILE"
           SIZE=$(stat -c%s "$FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
-          echo "Size: $SIZE bytes"
 
-      # ================== تقسیم هوشمند و ارسال ==================
       - name: Split and send media parts
         run: |
           TOKEN="${BALE_TOKEN}"
@@ -98,81 +103,47 @@ jobs:
           SIZE="${SIZE}"
           QUALITY="${{ inputs.quality }}"
 
-          # اگر فایل کوچک‌تر از ۱۰ مگابایت است، مستقیم ارسال کن
           if [ "$SIZE" -le 10485760 ]; then
-            echo "فایل کوچک است، ارسال مستقیم..."
             if [ "$QUALITY" = "audio" ]; then
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                -F "audio=@${FILE}" \
-                -F "caption=🎵 فایل صوتی شما"
+                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی شما"
             else
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                -F "video=@${FILE}" \
-                -F "caption=🎬 ویدیوی شما (کیفیت ${QUALITY})"
+                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
             fi
             exit 0
           fi
 
-          # استخراج مدت زمان و نرخ بیت
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
-          echo "Duration: ${DURATION} sec"
-          # نرخ بیت میانگین (بیت بر ثانیه)
           BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
-          echo "Average bitrate: ${BITRATE} bps"
-
-          # محاسبه زمان هر قطعه برای حدود ۹ مگابایت (۹ مگابایت = 75497472 بیت)
           TARGET_SIZE_BIT=75497472
-          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}), 2))")
-          # کمی حاشیه امن
-          SEG_TIME=$(python3 -c "print(round(${SEG_TIME} * 0.95, 2))")
-          echo "Segment time: ${SEG_TIME} sec"
-
-          # پسوند فایل
+          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
           EXT="${FILE##*.}"
 
-          # تقسیم با ffmpeg (کپی جریان‌ها)
           mkdir parts && cd parts
           ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
             -c copy -reset_timestamps 1 "part_%03d.${EXT}"
 
-          # شمارش قطعات
           TOTAL=$(ls part_*.${EXT} | wc -l)
-          echo "Total parts: ${TOTAL}"
-
           COUNT=1
           for PART in part_*.${EXT}; do
-            echo "Sending ${PART} (${COUNT}/${TOTAL})"
             SUCCESS=0
             for ATTEMPT in 1 2 3 4 5; do
               if [ "$QUALITY" = "audio" ]; then
                 RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                  -F "audio=@${PART}" \
-                  -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
+                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
               else
                 RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                  -F "video=@${PART}" \
-                  -F "caption=🎬 پارت ${COUNT}/${TOTAL} (کیفیت ${QUALITY})")
+                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
               fi
-              if echo "$RESP" | grep -q '"ok":true'; then
-                SUCCESS=1
-                break
-              fi
+              if echo "$RESP" | grep -q '"ok":true'; then SUCCESS=1; break; fi
               sleep 4
             done
-            if [ $SUCCESS -eq 0 ]; then
-              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
-            fi
+            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
             COUNT=$((COUNT + 1))
             sleep 2
           done
 
-          # پیام راهنما (اختیاری)
-          if [ "$QUALITY" != "audio" ]; then
-            MERGE_CMD="ffmpeg -f concat -safe 0 -i <(for f in part_*.${EXT}; do echo \"file '\$PWD/\$f'\"; done) -c copy merged.${EXT}"
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "📌 برای ادغام مجدد قطعات در لینوکس/مک:\n${MERGE_CMD}" | jq -sRr @uri)"
-          fi
-
-      # ================== گزارش نهایی ==================
       - name: Final report
         if: always()
         run: |
