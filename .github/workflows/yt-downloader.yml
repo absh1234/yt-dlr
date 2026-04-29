@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale (via Warp)
+name: 🎬 YouTube Downloader to Bale
 
 on:
   workflow_dispatch:
@@ -20,70 +20,64 @@ jobs:
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
     steps:
-      - name: Checkout repository (optional, only if you need other files)
-        uses: actions/checkout@v4
-
-      # ================== ابزارهای دانلود ==================
-      - name: Cache tools
-        id: cache
+      # ========== کش کامل (ابزارها + اکانت Warp) ==========
+      - name: Cache tools & warp account
+        id: cache-all
         uses: actions/cache@v4
         with:
-          path: ~/tools
-          key: tools-${{ runner.os }}-warp-v1
+          path: |
+            ~/tools
+            ~/.wgcf
+          key: warp-tools-${{ runner.os }}-v3
 
-      - name: Setup yt-dlp
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Install yt-dlp (if not cached)
+        if: steps.cache-all.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
+      - name: Install wgcf (if not cached)
+        if: steps.cache-all.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_amd64 -o ~/tools/wgcf
+          chmod +x ~/tools/wgcf
+
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ================== راه‌اندازی Cloudflare Warp ==================
-      - name: Install Cloudflare Warp
+      - name: Install WireGuard (only if missing)
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          sudo apt-get install cloudflare-warp -y
+          if ! command -v wg-quick &> /dev/null; then
+            sudo apt-get update && sudo apt-get install wireguard-tools -y
+          else
+            echo "WireGuard already installed."
+          fi
 
-      - name: Activate Warp proxy
+      # ========== راه‌اندازی Warp (فقط در صورت عدم وجود اکانت) ==========
+      - name: Register & connect to Cloudflare WARP
         run: |
-          # ورژن جدید از registration new استفاده می‌کند
-          sudo warp-cli --accept-tos registration new
-          sudo warp-cli set-mode proxy
-          sudo warp-cli set-proxy-port 10808
-          sudo warp-cli connect
-
-          # صبر کن تا پروکسی بالا بیاید
-          for i in $(seq 1 10); do
-            if nc -z 127.0.0.1 10808; then
-              echo "✅ Warp SOCKS5 proxy is ready"
-              break
-            fi
-            echo "Waiting for proxy... ${i}"
-            sleep 2
-          done
-
-          # نمایش وضعیت
-          sudo warp-cli status
-
-      # ================== دانلود ویدیو ==================
+          cd ~/.wgcf
+          # اگر فایل اکانت وجود نداشت، ثبت‌نام کن
+          if [ ! -f wgcf-account.toml ]; then
+            ~/tools/wgcf register --accept-tos
+            ~/tools/wgcf generate
+          fi
+          # فعال‌سازی تانل
+          sudo wg-quick up wgcf-profile.conf
+          echo "WARP is active."
+          
+      # ========== دانلود ویدیو ==========
       - name: Download media from YouTube
         run: |
-          # از پروکسی SOCKS5 استفاده کن
-          PROXY="--proxy socks5://127.0.0.1:10808"
-          echo "Downloading via Cloudflare Warp..."
-
+          echo "Downloading via Cloudflare WARP..."
           case "${{ inputs.quality }}" in
             best)
-              yt-dlp $PROXY -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
             720p)
-              yt-dlp $PROXY -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
             audio)
-              yt-dlp $PROXY -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
           esac
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
@@ -95,7 +89,7 @@ jobs:
           SIZE=$(stat -c%s "$FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
 
-      # ================== تقسیم و ارسال ==================
+      # ========== تقسیم و ارسال ==========
       - name: Split and send media parts
         run: |
           TOKEN="${BALE_TOKEN}"
@@ -145,7 +139,7 @@ jobs:
             sleep 2
           done
 
-      # ================== گزارش نهایی ==================
+      # ========== گزارش نهایی ==========
       - name: Final report
         if: always()
         run: |
