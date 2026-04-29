@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale
+name: 🎬 YouTube Downloader to Bale (via Warp)
 
 on:
   workflow_dispatch:
@@ -19,19 +19,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-      XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
-      SUB_URL: ${{ secrets.SUBSCRIPTION_URL }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (optional, only if you need other files)
         uses: actions/checkout@v4
 
-      # ----- ابزارهای پایه -----
+      # ================== ابزارهای دانلود ==================
       - name: Cache tools
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v14
+          key: tools-${{ runner.os }}-warp-v1
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -40,70 +38,45 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Setup Xray
-        if: steps.cache.outputs.cache-hit != 'true' && (env.XRAY_CONFIG != '' || env.SUB_URL != '')
-        run: |
-          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
-          unzip xray.zip -d ~/tools/xray
-          chmod +x ~/tools/xray/xray
-
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-        #---------------test --------------------
-      - name: Verify proxy is working
-        if: env.XRAY_CONFIG != '' || env.SUB_URL != ''
+      # ================== راه‌اندازی Cloudflare Warp ==================
+      - name: Install Cloudflare Warp
         run: |
-          sleep 3
-          if nc -z 127.0.0.1 10808; then
-            echo "✅ SOCKS5 proxy is listening"
-            curl --socks5 127.0.0.1:10808 -s -o /dev/null -w "HTTP %{http_code}" https://www.google.com
-          else
-            echo "❌ Proxy port not open!"
-            exit 1
-          fi
+          # Add official Warp repository
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install cloudflare-warp -y
 
-      # =============== تولید config.json با قابلیت fallback ===============
-      - name: Prepare Xray config (subscription or manual)
-        if: env.SUB_URL != '' || env.XRAY_CONFIG != ''
+      - name: Activate Warp proxy
         run: |
-          if [ -n "$SUB_URL" ]; then
-            echo "Attempting subscription…"
-            if python3 .github/scripts/sub2config.py "$SUB_URL" config.json 2>/dev/null; then
-              echo "✅ Subscription config generated"
-            else
-              echo "⚠️ Subscription failed, falling back to manual config"
-              echo "$XRAY_CONFIG" > config.json
+          # Register and connect (free, no account needed)
+          sudo warp-cli --accept-tos register
+          sudo warp-cli set-mode proxy
+          sudo warp-cli set-proxy-port 10808
+          sudo warp-cli connect
+
+          # Wait for proxy to become ready
+          for i in {1..10}; do
+            if nc -z 127.0.0.1 10808; then
+              echo "✅ Warp SOCKS5 proxy is ready"
+              break
             fi
-          else
-            echo "$XRAY_CONFIG" > config.json
-          fi
-          # امنیت: اگر فایل ساخته نشده بود، خروج خطا
-          if [ ! -s config.json ]; then
-            echo "❌ No config available"
-            exit 1
-          fi
-
-      # =============== راه‌اندازی پروکسی ===============
-      - name: Run Xray proxy
-        if: env.XRAY_CONFIG != '' || env.SUB_URL != ''
-        run: |
-          ~/tools/xray/xray run -config config.json &
-          for i in $(seq 1 10); do
-            nc -z 127.0.0.1 10808 && echo "Proxy ready" && break
+            echo "Waiting for proxy... ${i}"
             sleep 2
           done
 
-      # ----- دانلود -----
+          # Verify status
+          sudo warp-cli status
+
+      # ================== دانلود ویدیو ==================
       - name: Download media from YouTube
         run: |
-          PROXY=""
-          if nc -z 127.0.0.1 10808 2>/dev/null; then
-            PROXY="--proxy socks5://127.0.0.1:10808"
-            echo "Using proxy"
-          else
-            echo "No proxy, direct download"
-          fi
+          # از پروکسی SOCKS5 استفاده کن
+          PROXY="--proxy socks5://127.0.0.1:10808"
+          echo "Downloading via Cloudflare Warp..."
 
           case "${{ inputs.quality }}" in
             best)
@@ -116,14 +89,14 @@ jobs:
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
           if [ -z "$FILE" ]; then
-            echo "دانلود ناموفق بود."
+            echo "❌ دانلود ناموفق بود."
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
           SIZE=$(stat -c%s "$FILE")
           echo "SIZE=$SIZE" >> $GITHUB_ENV
 
-      # ----- تقسیم و ارسال -----
+      # ================== تقسیم و ارسال ==================
       - name: Split and send media parts
         run: |
           TOKEN="${BALE_TOKEN}"
@@ -173,7 +146,7 @@ jobs:
             sleep 2
           done
 
-      # ----- گزارش نهایی -----
+      # ================== گزارش نهایی ==================
       - name: Final report
         if: always()
         run: |
