@@ -1,4 +1,4 @@
-name: YT Downloader Advanced
+name: YT Downloader Pro
 
 on:
   workflow_dispatch:
@@ -14,115 +14,184 @@ on:
         description: "piped / ytdlp / ytdlp-vpn"
         required: true
         default: "piped"
+      target_chat_id:
+        description: "Bale Chat ID"
+        required: true
 
 jobs:
-  download:
+  download-and-send:
     runs-on: ubuntu-latest
 
+    env:
+      TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+      CHAT_ID: ${{ github.event.inputs.target_chat_id }}
+      URL: ${{ github.event.inputs.url }}
+      MODE: ${{ github.event.inputs.mode }}
+      QUALITY: ${{ github.event.inputs.quality }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # -------------------------
-      # Install dependencies
-      # -------------------------
-      - name: Install tools
+      # ------------------------------------------------
+      # Cache tools
+      # ------------------------------------------------
+      - name: Cache ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-bin
+          key: ffmpeg-cache-v1
+
+      - name: Install ffmpeg if not cached
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg curl jq
-          pip install yt-dlp
+          if [ ! -f ffmpeg-bin/ffmpeg ]; then
+            mkdir -p ffmpeg-bin
+            curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
+            tar -xf ffmpeg.tar.xz
+            mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-bin/
+          fi
+          echo "$PWD/ffmpeg-bin" >> $GITHUB_PATH
 
-      # -------------------------
-      # Install Xray (optional)
-      # -------------------------
-      - name: Install Xray
+      - name: Cache yt-dlp
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: ytdlp-cache-v1
+
+      - name: Install yt-dlp if not cached
+        run: |
+          mkdir -p ~/.local/bin
+          if [ ! -f ~/.local/bin/yt-dlp ]; then
+            curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp
+            chmod +x ~/.local/bin/yt-dlp
+          fi
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # ------------------------------------------------
+      # Optional Xray
+      # ------------------------------------------------
+      - name: Setup Xray (if vpn mode)
         if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
         run: |
-          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip xray.zip
-          chmod +x xray
-          mkdir xray-bin
+          mkdir -p xray-bin
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip -o xray.zip
           mv xray xray-bin/
+          chmod +x xray-bin/xray
 
-      - name: Setup Xray config
-        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
-        run: |
           cat <<EOF > config.json
           {
             "log": { "loglevel": "warning" },
-            "inbounds": [
-              {
-                "port": 10808,
-                "listen": "127.0.0.1",
-                "protocol": "socks",
-                "settings": { "udp": true }
-              }
-            ],
-            "outbounds": [
-              {
-                "protocol": "vless",
-                "settings": {
-                  "vnext": [{
-                    "address": "gwna1itwdw8-5ro7g-kp72r8st8jcbul.abolfazlsh444.workers.dev",
-                    "port": 443,
-                    "users": [{
-                      "id": "dc90d0ad-4897-4422-8d98-ae81d18576de",
-                      "encryption": "none"
-                    }]
+            "inbounds": [{
+              "port": 10808,
+              "listen": "127.0.0.1",
+              "protocol": "socks",
+              "settings": { "udp": true }
+            }],
+            "outbounds": [{
+              "protocol": "vless",
+              "settings": {
+                "vnext": [{
+                  "address": "gwna1itwdw8-5ro7g-kp72r8st8jcbul.abolfazlsh444.workers.dev",
+                  "port": 443,
+                  "users": [{
+                    "id": "dc90d0ad-4897-4422-8d98-ae81d18576de",
+                    "encryption": "none"
                   }]
-                },
-                "streamSettings": {
-                  "network": "ws",
-                  "security": "tls",
-                  "wsSettings": {
-                    "path": "/eyJqdW5rIjoiWjRQN3pUN2I1dG8iLCJwcm90b2NvbCI6InZsIiwibW9kZSI6InByb3h5aXAiLCJwYW5lbElQcyI6W119?ed=2560"
-                  }
+                }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "wsSettings": {
+                  "path": "/eyJqdW5rIjoiWjRQN3pUN2I1dG8iLCJwcm90b2NvbCI6InZsIiwibW9kZSI6InByb3h5aXAiLCJwYW5lbElQcyI6W119?ed=2560"
                 }
               }
-            ]
+            }]
           }
           EOF
 
-      - name: Start Xray
-        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
-        run: |
           ./xray-bin/xray -config config.json &
           sleep 5
 
-      # -------------------------
-      # MODE 1: PIPED
-      # -------------------------
-      - name: Download via Piped
-        if: ${{ github.event.inputs.mode == 'piped' }}
+      # ------------------------------------------------
+      # Send start message
+      # ------------------------------------------------
+      - name: Notify start
         run: |
-          VIDEO_ID=$(echo "${{ github.event.inputs.url }}" | sed 's/.*v=//')
-          API="https://piped.video/api/v1/streams/$VIDEO_ID"
-          curl -s $API -o streams.json
-          URL=$(jq -r '.videoStreams[0].url' streams.json)
-          curl -L "$URL" -o output.mp4
+          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
+            -d chat_id=$CHAT_ID \
+            -d text="⏳ دانلود شروع شد..."
 
-      # -------------------------
-      # MODE 2: YT-DLP DIRECT
-      # -------------------------
-      - name: Download via yt-dlp
-        if: ${{ github.event.inputs.mode == 'ytdlp' }}
+      # ------------------------------------------------
+      # Download Logic
+      # ------------------------------------------------
+      - name: Download
         run: |
-          yt-dlp -f best -o output.mp4 "${{ github.event.inputs.url }}"
+          set -e
 
-      # -------------------------
-      # MODE 3: YT-DLP + VPN
-      # -------------------------
-      - name: Download via yt-dlp + Xray
-        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
+          if [ "$MODE" = "piped" ]; then
+            VIDEO_ID=$(echo "$URL" | sed 's/.*v=//')
+            curl -s https://piped.video/api/v1/streams/$VIDEO_ID -o streams.json
+            DL=$(jq -r '.videoStreams[0].url' streams.json)
+            curl -L "$DL" -o output.mp4
+
+          elif [ "$MODE" = "ytdlp" ]; then
+            yt-dlp -f best -o output.mp4 "$URL"
+
+          elif [ "$MODE" = "ytdlp-vpn" ]; then
+            export ALL_PROXY=socks5://127.0.0.1:10808
+            yt-dlp -f best -o output.mp4 "$URL"
+          fi
+
+      # ------------------------------------------------
+      # Notify downloaded
+      # ------------------------------------------------
+      - name: Notify downloaded
         run: |
-          export ALL_PROXY=socks5://127.0.0.1:10808
-          yt-dlp -f best -o output.mp4 "${{ github.event.inputs.url }}"
+          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
+            -d chat_id=$CHAT_ID \
+            -d text="✅ دانلود کامل شد. در حال بررسی حجم فایل..."
 
-      # -------------------------
-      # Upload artifact
-      # -------------------------
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: video
-          path: output.mp4
+      # ------------------------------------------------
+      # Split if >10MB
+      # ------------------------------------------------
+      - name: Split if needed
+        run: |
+          SIZE=$(stat -c%s output.mp4)
+          LIMIT=$((10 * 1024 * 1024))
+
+          if [ $SIZE -gt $LIMIT ]; then
+            mkdir parts
+            ffmpeg -i output.mp4 -c copy -map 0 \
+              -f segment -segment_time 300 \
+              -reset_timestamps 1 parts/output_%03d.mp4
+            echo "SPLIT=true" >> $GITHUB_ENV
+          else
+            echo "SPLIT=false" >> $GITHUB_ENV
+          fi
+
+      # ------------------------------------------------
+      # Upload to Bale
+      # ------------------------------------------------
+      - name: Send to Bale
+        run: |
+          if [ "$SPLIT" = "true" ]; then
+            for f in parts/*.mp4; do
+              curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendVideo \
+                -F chat_id=$CHAT_ID \
+                -F video=@"$f"
+            done
+          else
+            curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendVideo \
+              -F chat_id=$CHAT_ID \
+              -F video=@output.mp4
+          fi
+
+      # ------------------------------------------------
+      # Final message
+      # ------------------------------------------------
+      - name: Final notify
+        run: |
+          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
+            -d chat_id=$CHAT_ID \
+            -d text="🎉 عملیات با موفقیت انجام شد."
