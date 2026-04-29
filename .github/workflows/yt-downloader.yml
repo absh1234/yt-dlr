@@ -44,7 +44,6 @@ jobs:
       # ================== راه‌اندازی Cloudflare Warp ==================
       - name: Install Cloudflare Warp
         run: |
-          # Add official Warp repository
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update
@@ -52,14 +51,14 @@ jobs:
 
       - name: Activate Warp proxy
         run: |
-          # Register and connect (free, no account needed)
-          sudo warp-cli --accept-tos register
+          # ورژن جدید از registration new استفاده می‌کند
+          sudo warp-cli --accept-tos registration new
           sudo warp-cli set-mode proxy
           sudo warp-cli set-proxy-port 10808
           sudo warp-cli connect
 
-          # Wait for proxy to become ready
-          for i in {1..10}; do
+          # صبر کن تا پروکسی بالا بیاید
+          for i in $(seq 1 10); do
             if nc -z 127.0.0.1 10808; then
               echo "✅ Warp SOCKS5 proxy is ready"
               break
@@ -68,7 +67,7 @@ jobs:
             sleep 2
           done
 
-          # Verify status
+          # نمایش وضعیت
           sudo warp-cli status
 
       # ================== دانلود ویدیو ==================
