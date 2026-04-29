@@ -17,6 +17,9 @@ on:
 jobs:
   download-and-send:
     runs-on: ubuntu-latest
+    env:
+      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+      XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
     steps:
       # ------------------- ابزارهای اولیه -------------------
       - name: Cache tools
@@ -24,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v9
+          key: tools-${{ runner.os }}-v10
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -33,8 +36,8 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Setup Xray (optional)
-        if: steps.cache.outputs.cache-hit != 'true' && secrets.XRAY_CONFIG != ''
+      - name: Setup Xray (only if config provided)
+        if: steps.cache.outputs.cache-hit != 'true' && env.XRAY_CONFIG != ''
         run: |
           curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
           unzip xray.zip -d ~/tools/xray
@@ -45,17 +48,14 @@ jobs:
 
       # ------------------- اجرای پروکسی (در صورت وجود) -------------------
       - name: Run Xray proxy
-        if: secrets.XRAY_CONFIG != ''
+        if: env.XRAY_CONFIG != ''
         run: |
-          echo "$XRAY_CONFIG_JSON" > config.json
+          echo "$XRAY_CONFIG" > config.json
           ~/tools/xray/xray run -config config.json &
-          # منتظر بمانیم تا پورت 10808 باز شود
           for i in {1..10}; do
             nc -z 127.0.0.1 10808 && break
             sleep 2
           done
-        env:
-          XRAY_CONFIG_JSON: ${{ secrets.XRAY_CONFIG }}
 
       # ------------------- دانلود ویدیو/صدا -------------------
       - name: Download media from YouTube
@@ -93,12 +93,11 @@ jobs:
           echo "ZIP_SIZE=$SIZE" >> $GITHUB_ENV
           echo "ZIP size: $SIZE bytes"
 
-      # ------------------- ارسال مستقیم (اگر حجم ZIP ≤ ۱۰ مگابایت) -------------------
+      # ------------------- ارسال مستقیم (حجم ≤ ۱۰ مگابایت) -------------------
       - name: Send small ZIP directly
         if: env.ZIP_SIZE <= 10485760
         run: |
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
+          curl -s -X POST "https://tapi.bale.ai/bot${BALE_TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
             -F "document=@archive.zip" \
             -F "caption=🎬 فایل دانلودشده از یوتیوب (کیفیت ${{ inputs.quality }})"
 
@@ -106,9 +105,8 @@ jobs:
       - name: Split and send large ZIP in parts
         if: env.ZIP_SIZE > 10485760
         run: |
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          TOKEN="${BALE_TOKEN}"
           mkdir parts && cd parts
-          # هر تکه حداکثر 9 مگابایت (کمی پایین‌تر از 10MB برای اطمینان)
           split -b 9M ../archive.zip part_
           a=1
           for f in part_*; do
@@ -135,11 +133,8 @@ jobs:
             sleep 2
           done
 
-          # پیام راهنمای ترکیب (ویندوز)
           MERGE_CMD="copy /b parts\\part_*.zip archive_full.zip"
           curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "برای بازسازی فایل، تمام پارت‌ها را در یک پوشه قرار دهید و از دستور زیر در CMD استفاده کنید:\n$MERGE_CMD" | jq -sRr @uri)"
-
-          # پیام راهنما برای لینوکس/مک (اختیاری)
           LINUX_CMD="cat part_* > archive_full.zip"
           curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "در لینوکس/مک:\n$LINUX_CMD" | jq -sRr @uri)"
 
@@ -147,9 +142,8 @@ jobs:
       - name: Final report
         if: always()
         run: |
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات دانلود و ارسال با موفقیت کامل شد."
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات دانلود و ارسال با موفقیت کامل شد."
           else
-            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
           fi
