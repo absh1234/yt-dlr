@@ -21,13 +21,13 @@ jobs:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
       XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
     steps:
-      # ------------------- ابزارهای اولیه -------------------
+      # ================== ابزارهای اولیه ==================
       - name: Cache tools
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v10
+          key: tools-${{ runner.os }}-v11
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -46,7 +46,7 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ------------------- اجرای پروکسی (در صورت وجود) -------------------
+      # ================== اجرای پروکسی (در صورت وجود) ==================
       - name: Run Xray proxy
         if: env.XRAY_CONFIG != ''
         run: |
@@ -57,8 +57,9 @@ jobs:
             sleep 2
           done
 
-      # ------------------- دانلود ویدیو/صدا -------------------
+      # ================== دانلود ویدیو/صدا ==================
       - name: Download media from YouTube
+        id: download
         run: |
           PROXY=""
           if nc -z 127.0.0.1 10808 2>/dev/null; then
@@ -79,66 +80,99 @@ jobs:
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
           if [ -z "$FILE" ]; then
-            echo "دانلود ناموفق بود."
+            echo "❌ دانلود ناموفق بود."
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
-          echo "File downloaded: $FILE"
+          echo "File: $FILE"
+          SIZE=$(stat -c%s "$FILE")
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
+          echo "Size: $SIZE bytes"
 
-      # ------------------- فشرده‌سازی (zip) -------------------
-      - name: Create ZIP archive
-        run: |
-          zip -9 archive.zip "$FILE"
-          SIZE=$(stat -c%s archive.zip)
-          echo "ZIP_SIZE=$SIZE" >> $GITHUB_ENV
-          echo "ZIP size: $SIZE bytes"
-
-      # ------------------- ارسال مستقیم (حجم ≤ ۱۰ مگابایت) -------------------
-      - name: Send small ZIP directly
-        if: env.ZIP_SIZE <= 10485760
-        run: |
-          curl -s -X POST "https://tapi.bale.ai/bot${BALE_TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
-            -F "document=@archive.zip" \
-            -F "caption=🎬 فایل دانلودشده از یوتیوب (کیفیت ${{ inputs.quality }})"
-
-      # ------------------- تقسیم و ارسال پارتیشنی (حجم > ۱۰ مگابایت) -------------------
-      - name: Split and send large ZIP in parts
-        if: env.ZIP_SIZE > 10485760
+      # ================== تقسیم هوشمند و ارسال ==================
+      - name: Split and send media parts
         run: |
           TOKEN="${BALE_TOKEN}"
+          CHAT_ID="${{ inputs.target_chat_id }}"
+          FILE="${FILE}"
+          SIZE="${SIZE}"
+          QUALITY="${{ inputs.quality }}"
+
+          # اگر فایل کوچک‌تر از ۱۰ مگابایت است، مستقیم ارسال کن
+          if [ "$SIZE" -le 10485760 ]; then
+            echo "فایل کوچک است، ارسال مستقیم..."
+            if [ "$QUALITY" = "audio" ]; then
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                -F "audio=@${FILE}" \
+                -F "caption=🎵 فایل صوتی شما"
+            else
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                -F "video=@${FILE}" \
+                -F "caption=🎬 ویدیوی شما (کیفیت ${QUALITY})"
+            fi
+            exit 0
+          fi
+
+          # استخراج مدت زمان و نرخ بیت
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
+          echo "Duration: ${DURATION} sec"
+          # نرخ بیت میانگین (بیت بر ثانیه)
+          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
+          echo "Average bitrate: ${BITRATE} bps"
+
+          # محاسبه زمان هر قطعه برای حدود ۹ مگابایت (۹ مگابایت = 75497472 بیت)
+          TARGET_SIZE_BIT=75497472
+          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}), 2))")
+          # کمی حاشیه امن
+          SEG_TIME=$(python3 -c "print(round(${SEG_TIME} * 0.95, 2))")
+          echo "Segment time: ${SEG_TIME} sec"
+
+          # پسوند فایل
+          EXT="${FILE##*.}"
+
+          # تقسیم با ffmpeg (کپی جریان‌ها)
           mkdir parts && cd parts
-          split -b 9M ../archive.zip part_
-          a=1
-          for f in part_*; do
-            mv "$f" $(printf "part_%03d.zip" $a)
-            a=$((a + 1))
-          done
-          total=$(ls part_*.zip | wc -l)
-          count=1
-          for part in part_*.zip; do
-            success=0
-            for attempt in 1 2 3 4 5; do
-              RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${{ inputs.target_chat_id }}" \
-                -F "document=@$part" \
-                -F "caption=🎬 پارت $count از $total (کیفیت ${{ inputs.quality }})")
+          ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
+            -c copy -reset_timestamps 1 "part_%03d.${EXT}"
+
+          # شمارش قطعات
+          TOTAL=$(ls part_*.${EXT} | wc -l)
+          echo "Total parts: ${TOTAL}"
+
+          COUNT=1
+          for PART in part_*.${EXT}; do
+            echo "Sending ${PART} (${COUNT}/${TOTAL})"
+            SUCCESS=0
+            for ATTEMPT in 1 2 3 4 5; do
+              if [ "$QUALITY" = "audio" ]; then
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                  -F "audio=@${PART}" \
+                  -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
+              else
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                  -F "video=@${PART}" \
+                  -F "caption=🎬 پارت ${COUNT}/${TOTAL} (کیفیت ${QUALITY})")
+              fi
               if echo "$RESP" | grep -q '"ok":true'; then
-                success=1; break
+                SUCCESS=1
+                break
               fi
               sleep 4
             done
-            if [ $success -eq 0 ]; then
-              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=⚠️ خطا در ارسال پارت $count"
+            if [ $SUCCESS -eq 0 ]; then
+              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
             fi
-            count=$((count + 1))
+            COUNT=$((COUNT + 1))
             sleep 2
           done
 
-          MERGE_CMD="copy /b parts\\part_*.zip archive_full.zip"
-          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "برای بازسازی فایل، تمام پارت‌ها را در یک پوشه قرار دهید و از دستور زیر در CMD استفاده کنید:\n$MERGE_CMD" | jq -sRr @uri)"
-          LINUX_CMD="cat part_* > archive_full.zip"
-          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=$(echo "در لینوکس/مک:\n$LINUX_CMD" | jq -sRr @uri)"
+          # پیام راهنما (اختیاری)
+          if [ "$QUALITY" != "audio" ]; then
+            MERGE_CMD="ffmpeg -f concat -safe 0 -i <(for f in part_*.${EXT}; do echo \"file '\$PWD/\$f'\"; done) -c copy merged.${EXT}"
+            curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=$(echo "📌 برای ادغام مجدد قطعات در لینوکس/مک:\n${MERGE_CMD}" | jq -sRr @uri)"
+          fi
 
-      # ------------------- گزارش نهایی -------------------
+      # ================== گزارش نهایی ==================
       - name: Final report
         if: always()
         run: |
