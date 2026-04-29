@@ -1,208 +1,128 @@
-name: 🎬 YouTube Downloader to Bale (Direct)
+name: YT Downloader Advanced
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک ویدیو یوتیوب'
+        description: "YouTube URL"
         required: true
       quality:
-        description: 'کیفیت (best, 720p, audio)'
+        description: "best / 720 / audio"
         required: true
-        default: 'best'
-      target_chat_id:
-        description: 'شناسه کاربر دریافت‌کننده'
+        default: "best"
+      mode:
+        description: "piped / ytdlp / ytdlp-vpn"
         required: true
+        default: "piped"
 
 jobs:
-  download-and-send:
+  download:
     runs-on: ubuntu-latest
-    env:
-      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+
     steps:
-      - name: Cache ffmpeg static build
-        id: cache-ffmpeg
-        uses: actions/cache@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # Install dependencies
+      # -------------------------
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg curl jq
+          pip install yt-dlp
+
+      # -------------------------
+      # Install Xray (optional)
+      # -------------------------
+      - name: Install Xray
+        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
+        run: |
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip
+          chmod +x xray
+          mkdir xray-bin
+          mv xray xray-bin/
+
+      - name: Setup Xray config
+        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
+        run: |
+          cat <<EOF > config.json
+          {
+            "log": { "loglevel": "warning" },
+            "inbounds": [
+              {
+                "port": 10808,
+                "listen": "127.0.0.1",
+                "protocol": "socks",
+                "settings": { "udp": true }
+              }
+            ],
+            "outbounds": [
+              {
+                "protocol": "vless",
+                "settings": {
+                  "vnext": [{
+                    "address": "gwna1itwdw8-5ro7g-kp72r8st8jcbul.abolfazlsh444.workers.dev",
+                    "port": 443,
+                    "users": [{
+                      "id": "dc90d0ad-4897-4422-8d98-ae81d18576de",
+                      "encryption": "none"
+                    }]
+                  }]
+                },
+                "streamSettings": {
+                  "network": "ws",
+                  "security": "tls",
+                  "wsSettings": {
+                    "path": "/eyJqdW5rIjoiWjRQN3pUN2I1dG8iLCJwcm90b2NvbCI6InZsIiwibW9kZSI6InByb3h5aXAiLCJwYW5lbElQcyI6W119?ed=2560"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+      - name: Start Xray
+        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
+        run: |
+          ./xray-bin/xray -config config.json &
+          sleep 5
+
+      # -------------------------
+      # MODE 1: PIPED
+      # -------------------------
+      - name: Download via Piped
+        if: ${{ github.event.inputs.mode == 'piped' }}
+        run: |
+          VIDEO_ID=$(echo "${{ github.event.inputs.url }}" | sed 's/.*v=//')
+          API="https://piped.video/api/v1/streams/$VIDEO_ID"
+          curl -s $API -o streams.json
+          URL=$(jq -r '.videoStreams[0].url' streams.json)
+          curl -L "$URL" -o output.mp4
+
+      # -------------------------
+      # MODE 2: YT-DLP DIRECT
+      # -------------------------
+      - name: Download via yt-dlp
+        if: ${{ github.event.inputs.mode == 'ytdlp' }}
+        run: |
+          yt-dlp -f best -o output.mp4 "${{ github.event.inputs.url }}"
+
+      # -------------------------
+      # MODE 3: YT-DLP + VPN
+      # -------------------------
+      - name: Download via yt-dlp + Xray
+        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
+        run: |
+          export ALL_PROXY=socks5://127.0.0.1:10808
+          yt-dlp -f best -o output.mp4 "${{ github.event.inputs.url }}"
+
+      # -------------------------
+      # Upload artifact
+      # -------------------------
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          path: ~/ffmpeg
-          key: ffmpeg-static-6.0
-
-      - name: Download static ffmpeg if not cached
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/ffmpeg
-          curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
-          tar xf ffmpeg.tar.xz -C ~/ffmpeg --strip-components=1
-
-      - name: Add ffmpeg to PATH
-        run: echo "$HOME/ffmpeg" >> $GITHUB_PATH
-
-      - name: Download video directly from YouTube
-        run: |
-          VIDEO_URL="${{ inputs.url }}"
-          QUALITY="${{ inputs.quality }}"
-          python3 << 'PYEOF'
-import sys, json, re, os, subprocess, urllib.request, html
-
-video_url = os.environ['VIDEO_URL']
-quality = os.environ['QUALITY']
-
-# Extract video ID
-video_id = None
-patterns = [r'(?:v=|/|youtu\.be/)([0-9A-Za-z_-]{11})']
-for p in patterns:
-    m = re.search(p, video_url)
-    if m:
-        video_id = m.group(1)
-        break
-if not video_id:
-    print("Invalid URL")
-    sys.exit(1)
-print(f"Video ID: {video_id}")
-
-# Fetch embed page with mobile user-agent
-embed_url = f"https://www.youtube.com/embed/{video_id}"
-headers = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-    'Accept-Language': 'en-US,en;q=0.9',
-}
-req = urllib.request.Request(embed_url, headers=headers)
-try:
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        html_content = resp.read().decode('utf-8')
-except Exception as e:
-    print(f"Failed to fetch embed page: {e}")
-    sys.exit(1)
-
-# Extract player_response
-player_response_matches = re.findall(r'ytInitialPlayerResponse\s*=\s*({.+?})\s*;', html_content)
-if not player_response_matches:
-    print("Could not find player_response")
-    sys.exit(1)
-player_response = json.loads(player_response_matches[0])
-
-# Parse streaming data
-streaming_data = player_response.get('streamingData', {})
-formats = streaming_data.get('formats', [])
-adaptive_formats = streaming_data.get('adaptiveFormats', [])
-all_formats = formats + adaptive_formats
-if not all_formats:
-    print("No formats found")
-    sys.exit(1)
-
-def extract_url(fmt):
-    url = fmt.get('url') or fmt.get('signatureCipher') or ''
-    if url and 'sig=' in url:
-        return url
-    return None
-
-if quality == 'audio':
-    audio_streams = [f for f in all_formats if 'audio' in f.get('mimeType', '')]
-    if not audio_streams:
-        print("No audio streams")
-        sys.exit(1)
-    best = max(audio_streams, key=lambda x: x.get('bitrate', 0))
-    stream_url = extract_url(best)
-    ext = 'm4a'
-    out_file = f"media.{ext}"
-else:
-    video_streams = [f for f in all_formats if 'video' in f.get('mimeType', '')]
-    if not video_streams:
-        print("No video streams")
-        sys.exit(1)
-    if quality == '720p':
-        video_streams = [f for f in video_streams if f.get('height', 0) <= 720]
-    if not video_streams:
-        video_streams = all_formats  # Fallback
-    best_video = max(video_streams, key=lambda x: (x.get('height', 0), x.get('bitrate', 0)))
-    stream_url_video = extract_url(best_video)
-    if not stream_url_video:
-        print("Video URL not extractable")
-        sys.exit(1)
-    if best_video.get('audioTrackName') or best_video.get('audioBitrate'):
-        stream_url = stream_url_video
-        out_file = "media.mp4"
-    else:
-        audio_streams = [f for f in all_formats if 'audio' in f.get('mimeType', '')]
-        if not audio_streams:
-            print("No audio for merge")
-            sys.exit(1)
-        best_audio = max(audio_streams, key=lambda x: x.get('bitrate', 0))
-        stream_url_audio = extract_url(best_audio)
-        if not stream_url_audio:
-            print("Audio URL not extractable")
-            sys.exit(1)
-        urllib.request.urlretrieve(stream_url_video, "video.mp4")
-        urllib.request.urlretrieve(stream_url_audio, "audio.m4a")
-        subprocess.run(['ffmpeg', '-y', '-i', 'video.mp4', '-i', 'audio.m4a', '-c', 'copy', 'media.mp4'], check=True)
-        out_file = "media.mp4"
-        stream_url = None
-
-if stream_url:
-    urllib.request.urlretrieve(stream_url, out_file)
-
-if not os.path.exists(out_file):
-    print("Download failed")
-    sys.exit(1)
-size = os.path.getsize(out_file)
-with open(os.environ['GITHUB_ENV'], 'a') as f:
-    f.write(f"FILE={out_file}\n")
-    f.write(f"SIZE={size}\n")
-print(f"Done: {out_file} ({size} bytes)")
-PYEOF
-
-      - name: Split and send to Bale
-        run: |
-          TOKEN="$BALE_TOKEN"
-          CHAT_ID="${{ inputs.target_chat_id }}"
-          FILE="$FILE"
-          SIZE="$SIZE"
-          QUALITY="${{ inputs.quality }}"
-
-          if [ "$SIZE" -le 10485760 ]; then
-            if [ "$QUALITY" = "audio" ]; then
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی"
-            else
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
-            fi
-            exit 0
-          fi
-
-          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
-          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
-          TARGET_SIZE_BIT=75497472
-          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
-          EXT="${FILE##*.}"
-          mkdir parts && cd parts
-          ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
-            -c copy -reset_timestamps 1 "part_%03d.${EXT}"
-          TOTAL=$(ls part_*.${EXT} | wc -l)
-          COUNT=1
-          for PART in part_*.${EXT}; do
-            SUCCESS=0
-            for ATTEMPT in 1 2 3 4 5; do
-              if [ "$QUALITY" = "audio" ]; then
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
-              else
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
-              fi
-              echo "$RESP" | grep -q '"ok":true' && SUCCESS=1 && break
-              sleep 4
-            done
-            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
-            COUNT=$((COUNT + 1))
-            sleep 2
-          done
-
-      - name: Report
-        if: always()
-        run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ دانلود و ارسال با موفقیت انجام شد."
-          else
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی رخ داد."
-          fi
+          name: video
+          path: output.mp4
