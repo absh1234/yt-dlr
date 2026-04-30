@@ -1,17 +1,17 @@
-name: 🎬 YouTube Downloader to Bale
+name: 🎬 YouTube Downloader to Bale (Ultimate Version)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک ویدیو یوتیوب'
+        description: 'YouTube Video URL'
         required: true
       quality:
-        description: 'کیفیت (best, 720p, audio)'
+        description: 'Quality (best, 720p, audio)'
         required: true
         default: 'best'
       target_chat_id:
-        description: 'شناسه کاربر دریافت‌کننده'
+        description: 'Target Chat ID'
         required: true
 
 jobs:
@@ -24,103 +24,103 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Cache yt-dlp
-        id: cache
+        id: cache-yt-dlp
         uses: actions/cache@v4
         with:
-          path: ~/tools
-          key: tools-${{ runner.os }}-v16
+          path: ~/tools/yt-dlp
+          key: ${{ runner.os }}-yt-dlp
 
       - name: Setup yt-dlp
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
           chmod +x ~/tools/yt-dlp
 
-      - name: Add tools to PATH
+      - name: Add yt-dlp to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
       - name: Download media from YouTube
         run: |
-          # Common flags to avoid bot detection
-          YT_FLAGS="--user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
+
+          YT_FLAGS="--cookies youtube_cookies.txt --user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
           YT_FLAGS="$YT_FLAGS --extractor-args youtube:player_client=android"
 
           case "${{ inputs.quality }}" in
             best)
-              yt-dlp $YT_FLAGS -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "media.mp4" "${{ inputs.url }}" ;;
             720p)
-              yt-dlp $YT_FLAGS -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" -o "media.mp4" "${{ inputs.url }}" ;;
             audio)
-              yt-dlp $YT_FLAGS -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestaudio" --extract-audio --audio-format mp3 -o "media.mp3" "${{ inputs.url }}" ;;
           esac
 
-          FILE=$(ls media.* 2>/dev/null | head -n1)
+          FILE=$(ls media.* | head -n1)
           if [ -z "$FILE" ]; then
-            echo "دانلود ناموفق بود."
+            echo "Download failed"
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
-          SIZE=$(stat -c%s "$FILE")
-          echo "SIZE=$SIZE" >> $GITHUB_ENV
+          echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-                # ----- تقسیم و ارسال -----
       - name: Split and send media parts
         run: |
-          TOKEN="${BALE_TOKEN}"
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ inputs.target_chat_id }}"
-          FILE="${FILE}"
-          SIZE="${SIZE}"
+          FILE="${{ env.FILE }}"
+          SIZE="${{ env.SIZE }}"
           QUALITY="${{ inputs.quality }}"
+          MAX_SIZE=9500000
 
-          if [ "$SIZE" -le 10485760 ]; then
+          if [ "$SIZE" -le "$MAX_SIZE" ]; then
             if [ "$QUALITY" = "audio" ]; then
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی شما"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" -F "audio=@${FILE}" -F "caption=🎵 Audio File"
             else
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" -F "video=@${FILE}" -F "caption=🎬 Video File"
             fi
-            exit 0
+          else
+            DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FILE")
+            SEG_TIME=$(python3 -c "print(round(($DURATION  ($MAX_SIZE / $SIZE))  0.85, 2))")
+            EXT="${FILE##*.}"
+
+            mkdir parts
+            ffmpeg -v quiet -i "$FILE" -f segment -segment_time "$SEG_TIME" -c copy -reset_timestamps 1 "parts/part_%03d.${EXT}"
+
+            TOTAL=$(ls parts/part_* | wc -l)
+            COUNT=1
+            for PART in parts/part_*; do
+              SUCCESS=0
+              for ATTEMPT in 1 2 3; do
+                if [ "$QUALITY" = "audio" ]; then
+                  RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" -F "audio=@${PART}" -F "caption=🎵 Part $COUNT/$TOTAL")
+                else
+                  RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" -F "video=@${PART}" -F "caption=🎬 Part $COUNT/$TOTAL")
+                fi
+                if echo "$RESP" | grep -q '"ok":true'; then
+
+                  SUCCESS=1
+                  break
+                fi
+                sleep 2
+              done
+
+              if [ $SUCCESS -eq 0 ]; then
+                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send part $COUNT"
+              fi
+              COUNT=$((COUNT + 1))
+            done
           fi
 
-          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
-          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
-          TARGET_SIZE_BIT=75497472
-          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
-          EXT="${FILE##*.}"
-
-          mkdir parts && cd parts
-          ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
-            -c copy -reset_timestamps 1 "part_%03d.${EXT}"
-
-          TOTAL=$(ls part_*.${EXT} | wc -l)
-          COUNT=1
-          for PART in part_*.${EXT}; do
-            SUCCESS=0
-            for ATTEMPT in 1 2 3 4 5; do
-              if [ "$QUALITY" = "audio" ]; then
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
-                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
-              else
-                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
-                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
-              fi
-              if echo "$RESP" | grep -q '"ok":true'; then SUCCESS=1; break; fi
-              sleep 4
-            done
-            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
-            COUNT=$((COUNT + 1))
-            sleep 2
-          done
-
-      # ----- گزارش نهایی -----
       - name: Final report
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات دانلود و ارسال با موفقیت کامل شد."
+            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ Operation Completed Successfully."
           else
-            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
+            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ Operation Failed."
           fi
