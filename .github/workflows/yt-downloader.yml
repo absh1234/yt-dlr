@@ -19,27 +19,22 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-      # yt-dlp looks for solver scripts in PATH or in any CHALLENGE_SOLVER_DIR
-      CHALLENGE_SOLVER_DIR: ${{ github.workspace }}/.scripts
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Node.js (required by the challenge solver) ----
+      # ---- Node.js (needed for challenge solver) ----
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ---- Download the challenge solver script (no git clone needed) ----
+      # ---- Install the official challenge solver (globally) ----
       - name: Install yt-dlp challenge solver
-        run: |
-          mkdir -p .scripts
-          curl -L -o .scripts/n.js https://raw.githubusercontent.com/yt-dlp/yt-dlp-challenge-solver/main/n.js
-          chmod +x .scripts/n.js
+        run: npm install -g yt-dlp-challenge-solver
 
-      # ---- Cache static FFmpeg ----
+      # ---- Static FFmpeg (cached) ----
       - name: Cache ffmpeg
         id: cache-ffmpeg
         uses: actions/cache@v4
@@ -57,7 +52,7 @@ jobs:
       - name: Add ffmpeg to PATH
         run: echo "$HOME/tools/ffmpeg" >> $GITHUB_PATH
 
-      # ---- Cache yt-dlp ----
+      # ---- yt-dlp (cached) ----
       - name: Cache yt-dlp
         id: cache-yt-dlp
         uses: actions/cache@v4
@@ -75,7 +70,7 @@ jobs:
       - name: Add yt-dlp to PATH
         run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
-      # ---- Download the media ----
+      # ---- Download the video/audio ----
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
@@ -113,7 +108,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---- Split & send if necessary ----
+      # ---- Split & send if file > 9.5 MB ----
       - name: Split and send media parts
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
@@ -131,12 +126,10 @@ jobs:
             fi
           else
             DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FILE")
-            # Calculate segment time proportionally, reduced by 15% for safety
             SEG_TIME=$(python3 -c "print(round(($DURATION * ($MAX_SIZE / $SIZE)) * 0.85, 2))")
             EXT="${FILE##*.}"
 
             mkdir -p parts
-            # Split with no re-encoding (-c copy)
             ffmpeg -v quiet -i "$FILE" -f segment -segment_time "$SEG_TIME" -c copy -reset_timestamps 1 "parts/part_%03d.${EXT}"
 
             TOTAL=$(ls parts/part_* | wc -l)
@@ -163,7 +156,7 @@ jobs:
             done
           fi
 
-      # ---- Report final status ----
+      # ---- Final status message ----
       - name: Final report
         if: always()
         run: |
