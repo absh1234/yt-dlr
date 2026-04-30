@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale (Ultimate Version)
+name: 🎬 YouTube Downloader to Bale
 
 on:
   workflow_dispatch:
@@ -53,16 +53,32 @@ jobs:
 
           case "${{ inputs.quality }}" in
             best)
-              yt-dlp $YT_FLAGS -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "media.mp4" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS \
+                -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+                --merge-output-format mp4 \
+                -o "media.%(ext)s" \
+                "${{ inputs.url }}"
+              FILE="media.mp4"
+              ;;
             720p)
-              yt-dlp $YT_FLAGS -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" -o "media.mp4" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS \
+                -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" \
+                --merge-output-format mp4 \
+                -o "media.%(ext)s" \
+                "${{ inputs.url }}"
+              FILE="media.mp4"
+              ;;
             audio)
-              yt-dlp $YT_FLAGS -f "bestaudio" --extract-audio --audio-format mp3 -o "media.mp3" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS \
+                -f "bestaudio" --extract-audio --audio-format mp3 \
+                -o "media.%(ext)s" \
+                "${{ inputs.url }}"
+              FILE="media.mp3"
+              ;;
           esac
 
-          FILE=$(ls media.* | head -n1)
-          if [ -z "$FILE" ]; then
-            echo "Download failed"
+          if [ ! -f "$FILE" ]; then
+            echo "Download failed: $FILE not found"
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
@@ -85,7 +101,7 @@ jobs:
             fi
           else
             DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FILE")
-            SEG_TIME=$(python3 -c "print(round(($DURATION  ($MAX_SIZE / $SIZE))  0.85, 2))")
+            SEG_TIME=$(python3 -c "print(round(($DURATION * ($MAX_SIZE / $SIZE)) * 0.85, 2))")
             EXT="${FILE##*.}"
 
             mkdir parts
@@ -102,7 +118,6 @@ jobs:
                   RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" -F "video=@${PART}" -F "caption=🎬 Part $COUNT/$TOTAL")
                 fi
                 if echo "$RESP" | grep -q '"ok":true'; then
-
                   SUCCESS=1
                   break
                 fi
