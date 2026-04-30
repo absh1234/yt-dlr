@@ -24,15 +24,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Node.js (needed for challenge solver) ----
+      # ---- Node.js (required for the challenge solver script) ----
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ---- Install the official challenge solver (globally) ----
+      # ---- Download the official challenge solver script ----
       - name: Install yt-dlp challenge solver
-        run: npm install -g yt-dlp-challenge-solver
+        run: |
+          # Create a directory that yt-dlp will search (we'll add it to PATH later)
+          mkdir -p ~/.local/bin
+          # Download the solver script directly from GitHub raw
+          curl -fsSL -o ~/.local/bin/n https://raw.githubusercontent.com/yt-dlp/yt-dlp-challenge-solver/main/n.js
+          # Check that the file is not empty (should be > 100 bytes)
+          if [ ! -s ~/.local/bin/n ]; then
+            echo "Challenge solver download failed or file is empty"
+            exit 1
+          fi
+          chmod +x ~/.local/bin/n
+          # Add to PATH so yt-dlp can find the 'n' command
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       # ---- Static FFmpeg (cached) ----
       - name: Cache ffmpeg
@@ -46,7 +58,7 @@ jobs:
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools/ffmpeg
-          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar xJ -C ~/tools/ffmpeg --strip-components=1
+          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar xJ -C ~/tools/ffmpeg --strip-components=1
           chmod +x ~/tools/ffmpeg/ffmpeg ~/tools/ffmpeg/ffprobe
 
       - name: Add ffmpeg to PATH
@@ -64,13 +76,13 @@ jobs:
         if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools/yt-dlp
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp/yt-dlp
+          curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp/yt-dlp
           chmod +x ~/tools/yt-dlp/yt-dlp
 
       - name: Add yt-dlp to PATH
         run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
-      # ---- Download the video/audio ----
+      # ---- Download the media ----
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
@@ -108,7 +120,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---- Split & send if file > 9.5 MB ----
+      # ---- Split & send if larger than 9.5 MB ----
       - name: Split and send media parts
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
@@ -156,7 +168,7 @@ jobs:
             done
           fi
 
-      # ---- Final status message ----
+      # ---- Final report ----
       - name: Final report
         if: always()
         run: |
