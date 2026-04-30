@@ -19,12 +19,26 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+      # Make sure yt-dlp finds the solver script
+      CHALLENGE_SOLVER_DIR: ${{ github.workspace }}/yt-dlp-challenge-solver
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Cache static FFmpeg ----
+      # ---- Install Node.js (required by the solver) ----
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ---- Download the yt-dlp challenge solver ----
+      - name: Clone yt-dlp challenge solver
+        run: |
+          git clone https://github.com/yt-dlp/yt-dlp-challenge-solver.git
+          # The solver expects a script named 'n' – it's already there after cloning
+
+      # ---- Static FFmpeg (cached) ----
       - name: Cache ffmpeg
         id: cache-ffmpeg
         uses: actions/cache@v4
@@ -42,7 +56,7 @@ jobs:
       - name: Add ffmpeg to PATH
         run: echo "$HOME/tools/ffmpeg" >> $GITHUB_PATH
 
-      # ---- Cache yt-dlp ----
+      # ---- yt-dlp (cached) ----
       - name: Cache yt-dlp
         id: cache-yt-dlp
         uses: actions/cache@v4
@@ -60,11 +74,11 @@ jobs:
       - name: Add yt-dlp to PATH
         run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
+      # ---- Download ----
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
 
-          # Flags – no android, only web (supports cookies)
           YT_FLAGS=(
             --cookies youtube_cookies.txt
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -98,6 +112,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
+      # ---- Split & send ----
       - name: Split and send media parts
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
