@@ -24,35 +24,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Node.js (required for challenge solver) ----
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # ---- Download challenge solver directly from GitHub ----
-      - name: Install yt-dlp challenge solver
-        run: |
-          mkdir -p ~/.local/bin
-          # Use the official raw URL with refs/heads/main
-          curl -fsSL -o ~/.local/bin/n.js https://raw.githubusercontent.com/yt-dlp/yt-dlp-challenge-solver/refs/heads/main/n.js
-          
-          # Create a wrapper script that yt-dlp can call as 'n'
-          cat > ~/.local/bin/n << 'EOF'
-          #!/bin/bash
-          node ~/.local/bin/n.js "$@"
-          EOF
-          
-          chmod +x ~/.local/bin/n ~/.local/bin/n.js
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
       # ---- Static FFmpeg (cached) ----
       - name: Cache ffmpeg
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: ~/tools/ffmpeg
-          key: ${{ runner.os }}-ffmpeg-static-v2
+          key: ${{ runner.os }}-ffmpeg-static-v3
 
       - name: Setup ffmpeg
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -70,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/tools/yt-dlp
-          key: ${{ runner.os }}-yt-dlp-v2
+          key: ${{ runner.os }}-yt-dlp-v3
 
       - name: Setup yt-dlp
         if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
@@ -82,15 +60,20 @@ jobs:
       - name: Add yt-dlp to PATH
         run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
-      # ---- Download media ----
+      # ---- Download with improved anti-detection ----
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
 
+          # Use multiple client fallbacks to avoid challenges
           YT_FLAGS=(
             --cookies youtube_cookies.txt
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            --extractor-args "youtube:player_client=web"
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            --extractor-args "youtube:player_client=web_embedded,web"
+            --extractor-retries 5
+            --retries 5
+            --fragment-retries 5
+            --no-check-certificates
             -o "media.%(ext)s"
             "${{ inputs.url }}"
           )
@@ -120,7 +103,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---- Split and send ----
+      # ---- Split and send if needed ----
       - name: Split and send media parts
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
@@ -168,7 +151,7 @@ jobs:
             done
           fi
 
-      # ---- Final status ----
+      # ---- Final report ----
       - name: Final report
         if: always()
         run: |
