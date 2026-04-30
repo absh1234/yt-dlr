@@ -18,19 +18,18 @@ jobs:
   download-and-send:
     runs-on: ubuntu-latest
     env:
-      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}      # kept, unused in snippet
+      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ----- Cache only yt-dlp (Tor installed fresh) -----
-      - name: Cache tools
+      - name: Cache yt-dlp
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/tools
-          key: tools-${{ runner.os }}-v15    # bump key to avoid stale cache
+          key: tools-${{ runner.os }}-v16
 
       - name: Setup yt-dlp
         if: steps.cache.outputs.cache-hit != 'true'
@@ -42,45 +41,19 @@ jobs:
       - name: Add tools to PATH
         run: echo "$HOME/tools" >> $GITHUB_PATH
 
-      # ----- Tor proxy replaces Xray -----
-      - name: Install and start Tor
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tor
-          # Enable control port for circuit renewal
-          echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
-          echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
-          sudo service tor restart
-          # Wait until SOCKS5 port is ready
-          for i in $(seq 1 10); do
-            nc -z 127.0.0.1 9050 && echo "Tor SOCKS5 proxy ready" && break
-            sleep 1
-          done
-
-      - name: Force fresh Tor circuit (new exit IP)
-        run: |
-          (echo authenticate '""'; echo signal newnym; echo quit) | nc 127.0.0.1 9051
-          sleep 2   # let the circuit rebuild
-          echo "New Tor circuit requested"
-
-      # ----- Download -----
       - name: Download media from YouTube
         run: |
-          PROXY=""
-          if nc -z 127.0.0.1 9050 2>/dev/null; then
-            PROXY="--proxy socks5://127.0.0.1:9050"
-            echo "Using Tor proxy"
-          else
-            echo "Tor not available – direct download"
-          fi
+          # Common flags to avoid bot detection
+          YT_FLAGS="--user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
+          YT_FLAGS="$YT_FLAGS --extractor-args youtube:player_client=android"
 
           case "${{ inputs.quality }}" in
             best)
-              yt-dlp $PROXY -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
             720p)
-              yt-dlp $PROXY -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
             audio)
-              yt-dlp $PROXY -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
+              yt-dlp $YT_FLAGS -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
           esac
 
           FILE=$(ls media.* 2>/dev/null | head -n1)
