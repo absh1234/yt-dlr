@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale (Fixed & Optimized)
+name: 🎬 YouTube Downloader to Bale
 
 on:
   workflow_dispatch:
@@ -18,127 +18,136 @@ jobs:
   download-and-send:
     runs-on: ubuntu-latest
     env:
-      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}      # kept, unused in snippet
+
     steps:
-      # ۱. مرحله حیاتی: کپی کردن فایل‌های مخزن شما به داخل ماشین مجازی
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ۲. تنظیم پایتون با قابلیت کش کردن کتابخانه‌ها
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      # ----- Cache only yt-dlp (Tor installed fresh) -----
+      - name: Cache tools
+        id: cache
+        uses: actions/cache@v4
         with:
-          python-version: '3.9'
-          cache: 'pip' # این باعث می‌شود در ران‌های بعدی سرعت بالا برود
+          path: ~/tools
+          key: tools-${{ runner.os }}-v15    # bump key to avoid stale cache
 
-      # ۳. نصب کتابخانه‌های مورد نیاز (فقط اگر قبلاً در کش نبوده باشند)
-      - name: Install Python dependencies
+      - name: Setup yt-dlp
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp requests
+          mkdir -p ~/tools
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
+          chmod +x ~/tools/yt-dlp
 
-      # ۴. استخراج اطلاعات ویدیو با سیستم هوشمند (Piped + Fallback)
-      - name: Extract video info
-        id: info
+      - name: Add tools to PATH
+        run: echo "$HOME/tools" >> $GITHUB_PATH
+
+      # ----- Tor proxy replaces Xray -----
+      - name: Install and start Tor
         run: |
-          VIDEO_ID=$(echo "${{ inputs.url }}" | sed -n 's/.[?&]v=\([^&]*\).*/\1/p; s/.*youtu.be\/\([^?]*\).*/\1/p; s/.*youtube.com\/embed\/\([^?]*\).*/\1/p' | tail -1)
-          if [ -z "$VIDEO_ID" ]; then echo "Invalid URL"; exit 1; fi
-          echo "Video ID: $VIDEO_ID"
-
-          # تلاش برای استفاده از Piped API
-          INSTANCES=("pipedapi.kavin.rocks" "pipedapi.canary.yt" "pipedapi.privacy.dev")
-          SUCCESS=false
-          for INSTANCE in "${INSTANCES[@]}"; do
-            echo "Trying $INSTANCE..."
-            RESPONSE=$(curl -s -L -A "Mozilla/5.0" --connect-timeout 10 "https://$INSTANCE/streams/${VIDEO_ID}")
-            if [[ "$RESPONSE" == \{* ]] && echo "$RESPONSE" | jq -e '.videoStreams' > /dev/null 2>&1; then
-              echo "Piped success!"
-              echo "USE_PIPED=true" >> $GITHUB_ENV
-              SUCCESS=true
-              break
-            fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tor
+          # Enable control port for circuit renewal
+          echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
+          echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
+          sudo service tor restart
+          # Wait until SOCKS5 port is ready
+          for i in $(seq 1 10); do
+            nc -z 127.0.0.1 9050 && echo "Tor SOCKS5 proxy ready" && break
+            sleep 1
           done
 
-          if [ "$SUCCESS" = false ]; then
-            echo "Piped failed, using direct yt-dlp fallback..."
-            echo "USE_PIPED=false" >> $GITHUB_ENV
-          fi
-
-      # ۵. دانلود ویدیو (با استفاده از yt-dlp که بسیار پایدار است)
-      - name: Download Video
+      - name: Force fresh Tor circuit (new exit IP)
         run: |
-          if [ "${{ inputs.quality }}" = "audio" ]; then
-            yt-dlp -x --audio-format mp3 -o "video.mp3" "${{ inputs.url }}"
+          (echo authenticate '""'; echo signal newnym; echo quit) | nc 127.0.0.1 9051
+          sleep 2   # let the circuit rebuild
+          echo "New Tor circuit requested"
 
-            FILE_NAME="video.mp3"
+      # ----- Download -----
+      - name: Download media from YouTube
+        run: |
+          PROXY=""
+          if nc -z 127.0.0.1 9050 2>/dev/null; then
+            PROXY="--proxy socks5://127.0.0.1:9050"
+            echo "Using Tor proxy"
           else
-            yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" -o "video.mp4" "${{ inputs.url }}"
-            FILE_NAME="video.mp4"
+            echo "Tor not available – direct download"
           fi
 
-      # ۶. ارسال نهایی به بله
-      - name: Send to Bale
-        run: |
-          curl -F "file=@$FILE_NAME" "https://api.bale.ai/bot/sendDocument?token=${{ secrets.BALE_BOT_TOKEN }}&chat_id=${{ inputs.target_chat_id }}"      - name: Extract video ID and get streams
-        id: streams
-        run: |
-          # استخراج ویدیو آی‌دی
-          VIDEO_ID=$(echo "${{ inputs.url }}" | sed -n 's/.[?&]v=\([^&]*\).*/\1/p; s/.*youtu.be\/\([^?]*\).*/\1/p; s/.*youtube.com\/embed\/\([^?]*\).*/\1/p' | tail -1)
-          if [ -z "$VIDEO_ID" ]; then echo "Invalid URL"; exit 1; fi
-          echo "Video ID: $VIDEO_ID"
+          case "${{ inputs.quality }}" in
+            best)
+              yt-dlp $PROXY -f "bestvideo+bestaudio/best" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+            720p)
+              yt-dlp $PROXY -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "media.%(ext)s" "${{ inputs.url }}" ;;
+            audio)
+              yt-dlp $PROXY -f "bestaudio" --extract-audio --audio-format mp3 -o "media.%(ext)s" "${{ inputs.url }}" ;;
+          esac
 
-          # لیست اینستنس‌های پایدارتر
-          INSTANCES=("pipedapi.kavin.rocks" "pipedapi.canary.yt" "pipedapi.privacy.dev" "pipedapi.dev")
-
-          SUCCESS=false
-          for INSTANCE in "${INSTANCES[@]}"; do
-            echo "Trying instance: $INSTANCE"
-            # استفاده از User-Agent برای جلوگیری از بلاک شدن توسط یوتیوب/پایپد
-            API="https://$INSTANCE/streams/${VIDEO_ID}"
-            RESPONSE=$(curl -s -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" --connect-timeout 15 "$API")
-
-            # چک کردن دقیق JSON بودن پاسخ
-            if [[ "$RESPONSE" == \{* ]] && echo "$RESPONSE" | jq -e '.videoStreams' > /dev/null 2>&1; then
-              echo "Successfully connected to $INSTANCE"
-              echo "STREAMS=$RESPONSE" >> $GITHUB_ENV
-              SUCCESS=true
-              break
-            fi
-            echo "Instance $INSTANCE failed, trying next..."
-          done
-
-
-          if [ "$SUCCESS" = false ]; then
-            echo "Error: All Piped instances failed. Trying direct yt-dlp fallback..."
-            # اگر تمام اینستنس‌ها شکست خوردند، مستقیماً از yt-dlp استفاده کن (راه حل نهایی)
-            echo "FALLBACK_MODE=true" >> $GITHUB_ENV
-            SUCCESS=true
+          FILE=$(ls media.* 2>/dev/null | head -n1)
+          if [ -z "$FILE" ]; then
+            echo "دانلود ناموفق بود."
+            exit 1
           fi
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          SIZE=$(stat -c%s "$FILE")
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
 
-      # ۴. مرحله دانلود و ارسال (با استفاده از yt-dlp که بسیار قدرتمندتر است)
-      - name: Download and Send
+                # ----- تقسیم و ارسال -----
+      - name: Split and send media parts
         run: |
-          if [ "${{ env.FALLBACK_MODE }}" = "true" ]; then
-            echo "Using direct yt-dlp fallback..."
-            # دانلود مستقیم بدون نیاز به Piped API (بسیار پایدارتر)
-            # اگر کیفیت audio بود، فقط صدا را دانلود کن
-            if [ "${{ inputs.quality }}" = "audio" ]; then
-               yt-dlp -x --audio-format mp3 -o "video.mp3" "${{ inputs.url }}"
+          TOKEN="${BALE_TOKEN}"
+          CHAT_ID="${{ inputs.target_chat_id }}"
+          FILE="${FILE}"
+          SIZE="${SIZE}"
+          QUALITY="${{ inputs.quality }}"
+
+          if [ "$SIZE" -le 10485760 ]; then
+            if [ "$QUALITY" = "audio" ]; then
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی شما"
             else
-               yt-dlp -f "bestvideo+bestaudio/best" -o "video.mp4" "${{ inputs.url }}"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
             fi
-            FILE_NAME="video.mp4"
-            [ "${{ inputs.quality }}" = "audio" ] && FILE_NAME="video.mp3"
-          else
-            # اگر Piped کار کرد، از همان استریم‌های API استفاده کن (بخش کد قبلی شما اینجا قرار می‌گیرد)
-            # اما برای سادگی، پیشنهاد من استفاده از همان yt-dlp در بالا است.
-            # اگر می‌خواهید حتماً از API استفاده کنید، کد استخراج از JSON را اینجا بنویسید.
-            echo "Using Piped API streams..."
-            # (بخش مربوط به پردازش JSON استریم‌ها را اینجا قرار دهید)
-            # جهت جلوگیری از پیچیدگی، فعلاً از yt-dlp استفاده می‌کنیم که خودش همه این کارها را انجام می‌دهد.
-            yt-dlp -o "video.mp4" "${{ inputs.url }}"
-            FILE_NAME="video.mp4"
+            exit 0
           fi
 
-          # ارسال به بله (با استفاده از curl)
-          curl -F "file=@$FILE_NAME" "https://api.bale.ai/bot/sendDocument?token=${{ secrets.BALE_BOT_TOKEN }}&chat_id=${{ inputs.target_chat_id }}"
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
+          BITRATE=$(python3 -c "print(int(${SIZE} * 8 / float(${DURATION})))")
+          TARGET_SIZE_BIT=75497472
+          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BIT} / float(${BITRATE}) * 0.95, 2))")
+          EXT="${FILE##*.}"
+
+          mkdir parts && cd parts
+          ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
+            -c copy -reset_timestamps 1 "part_%03d.${EXT}"
+
+          TOTAL=$(ls part_*.${EXT} | wc -l)
+          COUNT=1
+          for PART in part_*.${EXT}; do
+            SUCCESS=0
+            for ATTEMPT in 1 2 3 4 5; do
+              if [ "$QUALITY" = "audio" ]; then
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
+              else
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
+              fi
+              if echo "$RESP" | grep -q '"ok":true'; then SUCCESS=1; break; fi
+              sleep 4
+            done
+            [ $SUCCESS -eq 0 ] && curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ خطا در ارسال پارت ${COUNT}"
+            COUNT=$((COUNT + 1))
+            sleep 2
+          done
+
+      # ----- گزارش نهایی -----
+      - name: Final report
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات دانلود و ارسال با موفقیت کامل شد."
+          else
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطایی در عملیات رخ داد."
+          fi
