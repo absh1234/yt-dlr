@@ -24,9 +24,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # ---- Cache static FFmpeg ----
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/tools/ffmpeg
+          key: ${{ runner.os }}-ffmpeg-static
 
+      - name: Setup ffmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools/ffmpeg
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar xJ -C ~/tools/ffmpeg --strip-components=1
+          chmod +x ~/tools/ffmpeg/ffmpeg ~/tools/ffmpeg/ffprobe
+
+      - name: Add ffmpeg to PATH
+        run: echo "$HOME/tools/ffmpeg" >> $GITHUB_PATH
+
+      # ---- Cache yt-dlp ----
       - name: Cache yt-dlp
         id: cache-yt-dlp
         uses: actions/cache@v4
@@ -37,44 +53,40 @@ jobs:
       - name: Setup yt-dlp
         if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/tools
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
-          chmod +x ~/tools/yt-dlp
+          mkdir -p ~/tools/yt-dlp
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp/yt-dlp
+          chmod +x ~/tools/yt-dlp/yt-dlp
 
       - name: Add yt-dlp to PATH
-        run: echo "$HOME/tools" >> $GITHUB_PATH
+        run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
 
-          # Use an array to safely pass arguments with spaces
+          # Flags – no android, only web (supports cookies)
           YT_FLAGS=(
             --cookies youtube_cookies.txt
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            --extractor-args "youtube:player_client=android,web"
+            --extractor-args "youtube:player_client=web"
+            -o "media.%(ext)s"
+            "${{ inputs.url }}"
           )
 
           case "${{ inputs.quality }}" in
             best)
               yt-dlp "${YT_FLAGS[@]}" \
-                -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
-                -o "media.%(ext)s" \
-                "${{ inputs.url }}"
+                -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
               FILE="media.mp4"
               ;;
             720p)
               yt-dlp "${YT_FLAGS[@]}" \
-                -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" \
-                -o "media.%(ext)s" \
-                "${{ inputs.url }}"
+                -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best"
               FILE="media.mp4"
               ;;
             audio)
               yt-dlp "${YT_FLAGS[@]}" \
-                -f "bestaudio" --extract-audio --audio-format mp3 \
-                -o "media.%(ext)s" \
-                "${{ inputs.url }}"
+                -f "bestaudio" --extract-audio --audio-format mp3
               FILE="media.mp3"
               ;;
           esac
@@ -141,5 +153,3 @@ jobs:
           else
             curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ Operation Failed."
           fi
-
-      
