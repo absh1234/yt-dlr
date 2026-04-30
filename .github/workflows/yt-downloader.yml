@@ -19,32 +19,33 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-      # Make sure yt-dlp finds the solver script
-      CHALLENGE_SOLVER_DIR: ${{ github.workspace }}/yt-dlp-challenge-solver
+      # yt-dlp looks for solver scripts in PATH or in any CHALLENGE_SOLVER_DIR
+      CHALLENGE_SOLVER_DIR: ${{ github.workspace }}/.scripts
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Install Node.js (required by the solver) ----
+      # ---- Node.js (required by the challenge solver) ----
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ---- Download the yt-dlp challenge solver ----
-      - name: Clone yt-dlp challenge solver
+      # ---- Download the challenge solver script (no git clone needed) ----
+      - name: Install yt-dlp challenge solver
         run: |
-          git clone https://github.com/yt-dlp/yt-dlp-challenge-solver.git
-          # The solver expects a script named 'n' – it's already there after cloning
+          mkdir -p .scripts
+          curl -L -o .scripts/n.js https://raw.githubusercontent.com/yt-dlp/yt-dlp-challenge-solver/main/n.js
+          chmod +x .scripts/n.js
 
-      # ---- Static FFmpeg (cached) ----
+      # ---- Cache static FFmpeg ----
       - name: Cache ffmpeg
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: ~/tools/ffmpeg
-          key: ${{ runner.os }}-ffmpeg-static
+          key: ${{ runner.os }}-ffmpeg-static-v1
 
       - name: Setup ffmpeg
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -56,13 +57,13 @@ jobs:
       - name: Add ffmpeg to PATH
         run: echo "$HOME/tools/ffmpeg" >> $GITHUB_PATH
 
-      # ---- yt-dlp (cached) ----
+      # ---- Cache yt-dlp ----
       - name: Cache yt-dlp
         id: cache-yt-dlp
         uses: actions/cache@v4
         with:
           path: ~/tools/yt-dlp
-          key: ${{ runner.os }}-yt-dlp
+          key: ${{ runner.os }}-yt-dlp-v1
 
       - name: Setup yt-dlp
         if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
@@ -74,7 +75,7 @@ jobs:
       - name: Add yt-dlp to PATH
         run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
 
-      # ---- Download ----
+      # ---- Download the media ----
       - name: Download media from YouTube
         run: |
           echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
@@ -112,7 +113,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---- Split & send ----
+      # ---- Split & send if necessary ----
       - name: Split and send media parts
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
@@ -130,10 +131,12 @@ jobs:
             fi
           else
             DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FILE")
+            # Calculate segment time proportionally, reduced by 15% for safety
             SEG_TIME=$(python3 -c "print(round(($DURATION * ($MAX_SIZE / $SIZE)) * 0.85, 2))")
             EXT="${FILE##*.}"
 
-            mkdir parts
+            mkdir -p parts
+            # Split with no re-encoding (-c copy)
             ffmpeg -v quiet -i "$FILE" -f segment -segment_time "$SEG_TIME" -c copy -reset_timestamps 1 "parts/part_%03d.${EXT}"
 
             TOTAL=$(ls parts/part_* | wc -l)
@@ -160,6 +163,7 @@ jobs:
             done
           fi
 
+      # ---- Report final status ----
       - name: Final report
         if: always()
         run: |
