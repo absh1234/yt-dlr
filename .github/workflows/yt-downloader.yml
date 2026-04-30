@@ -1,4 +1,4 @@
-name: 🎬 YouTube Downloader to Bale (Ultimate Version)
+name: 🎬 YouTube Downloader to Bale (Ultimate + Xray)
 
 on:
   workflow_dispatch:
@@ -24,15 +24,46 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---- Static FFmpeg (cached) ----
+      # ---------- Cache tools (yt-dlp & Xray) ----------
+      - name: Cache tools (yt-dlp & Xray)
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/tools/yt-dlp
+            ~/tools/xray
+          key: tools-${{ runner.os }}-v3
+
+      - name: Download yt-dlp (if not cached)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools
+          curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp
+          chmod +x ~/tools/yt-dlp
+
+      - name: Download Xray core (if not cached)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/tools/xray
+          curl -fsSL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip -q xray.zip -d ~/tools/xray
+          chmod +x ~/tools/xray/xray
+          rm xray.zip
+
+      - name: Add tools to PATH
+        run: |
+          echo "$HOME/tools" >> $GITHUB_PATH
+          echo "$HOME/tools/xray" >> $GITHUB_PATH
+
+      # ---------- Cache static FFmpeg ----------
       - name: Cache ffmpeg
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: ~/tools/ffmpeg
-          key: ${{ runner.os }}-ffmpeg-static-v3
+          key: ${{ runner.os }}-ffmpeg-static-v4
 
-      - name: Setup ffmpeg
+      - name: Setup ffmpeg (if not cached)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/tools/ffmpeg
@@ -42,38 +73,31 @@ jobs:
       - name: Add ffmpeg to PATH
         run: echo "$HOME/tools/ffmpeg" >> $GITHUB_PATH
 
-      # ---- yt-dlp (cached) ----
-      - name: Cache yt-dlp
-        id: cache-yt-dlp
-        uses: actions/cache@v4
-        with:
-          path: ~/tools/yt-dlp
-          key: ${{ runner.os }}-yt-dlp-v3
-
-      - name: Setup yt-dlp
-        if: steps.cache-yt-dlp.outputs.cache-hit != 'true'
+      # ---------- Start Xray proxy ----------
+      - name: Start Xray proxy
         run: |
-          mkdir -p ~/tools/yt-dlp
-          curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/tools/yt-dlp/yt-dlp
-          chmod +x ~/tools/yt-dlp/yt-dlp
+          echo '${{ secrets.XRAY_CONFIG }}' > config.json
+          xray run -config config.json &
+          sleep 2
+          # Verify proxy is working
+          curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
+          echo "✅ Proxy is active"
 
-      - name: Add yt-dlp to PATH
-        run: echo "$HOME/tools/yt-dlp" >> $GITHUB_PATH
-
-      # ---- Download with improved anti-detection ----
+      # ---------- Download media ----------
       - name: Download media from YouTube
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
+            COOKIE_FLAG="--cookies youtube_cookies.txt"
+          else
+            COOKIE_FLAG=""
+          fi
 
-          # Use multiple client fallbacks to avoid challenges
           YT_FLAGS=(
-            --cookies youtube_cookies.txt
+            --proxy socks5://127.0.0.1:10808
+            $COOKIE_FLAG
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             --extractor-args "youtube:player_client=web_embedded,web"
-            --extractor-retries 5
-            --retries 5
-            --fragment-retries 5
-            --no-check-certificates
             -o "media.%(ext)s"
             "${{ inputs.url }}"
           )
@@ -97,62 +121,66 @@ jobs:
           esac
 
           if [ ! -f "$FILE" ]; then
-            echo "Download failed: $FILE not found"
+            echo "❌ Download failed"
             exit 1
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---- Split and send if needed ----
-      - name: Split and send media parts
+      # ---------- Split if larger than 10 MB ----------
+      - name: Split video if needed
+        if: env.SIZE > 10485760
+        run: |
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$FILE")
+          DURATION=${DURATION%.*}
+          # Aim for ~5 parts, but ensure each < 10 MB by using a time segment
+          SEG_TIME=$(python3 -c "print(round($DURATION * (10000000 / $SIZE) * 0.9, 2))")
+          mkdir -p parts
+          ffmpeg -v quiet -i "$FILE" -c copy -map 0 -segment_time "$SEG_TIME" -f segment -reset_timestamps 1 "parts/part_%03d.${FILE##*.}"
+          echo "TOTAL_PARTS=$(ls parts/part_* | wc -l)" >> $GITHUB_ENV
+
+      # ---------- Send to Bale ----------
+      - name: Send media to Bale
         run: |
           TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
           CHAT_ID="${{ inputs.target_chat_id }}"
-          FILE="${{ env.FILE }}"
-          SIZE="${{ env.SIZE }}"
-          QUALITY="${{ inputs.quality }}"
-          MAX_SIZE=9500000
+          VIDEO_URL="${{ inputs.url }}"
 
-          if [ "$SIZE" -le "$MAX_SIZE" ]; then
-            if [ "$QUALITY" = "audio" ]; then
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" -F "audio=@${FILE}" -F "caption=🎵 Audio File"
-            else
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" -F "video=@${FILE}" -F "caption=🎬 Video File"
-            fi
-          else
-            DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FILE")
-            SEG_TIME=$(python3 -c "print(round(($DURATION * ($MAX_SIZE / $SIZE)) * 0.85, 2))")
-            EXT="${FILE##*.}"
-
-            mkdir -p parts
-            ffmpeg -v quiet -i "$FILE" -f segment -segment_time "$SEG_TIME" -c copy -reset_timestamps 1 "parts/part_%03d.${EXT}"
-
-            TOTAL=$(ls parts/part_* | wc -l)
-            COUNT=1
-            for PART in parts/part_*; do
-              SUCCESS=0
-              for ATTEMPT in 1 2 3; do
-                if [ "$QUALITY" = "audio" ]; then
-                  RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" -F "audio=@${PART}" -F "caption=🎵 Part $COUNT/$TOTAL")
-                else
-                  RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" -F "video=@${PART}" -F "caption=🎬 Part $COUNT/$TOTAL")
-                fi
-                if echo "$RESP" | grep -q '"ok":true'; then
-                  SUCCESS=1
-                  break
-                fi
-                sleep 2
-              done
-
-              if [ $SUCCESS -eq 0 ]; then
-                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send part $COUNT"
+          send_file() {
+            local file="$1"
+            local caption="$2"
+            local attempt=1
+            while [ $attempt -le 3 ]; do
+              RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$caption'))")" \
+                -F "document=@$file")
+              if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
+                return 0
               fi
+              sleep 2
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          if [ "$SIZE" -le 10485760 ]; then
+            send_file "$FILE" "🎬 $VIDEO_URL" || {
+              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send file"
+            }
+          else
+            cd parts
+            TOTAL=$TOTAL_PARTS
+            COUNT=1
+            for part in part_*; do
+              send_file "$part" "🎬 $VIDEO_URL - Part $COUNT/$TOTAL" || {
+                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send part $COUNT"
+              }
               COUNT=$((COUNT + 1))
+              sleep 1
             done
           fi
 
-      # ---- Final report ----
-      - name: Final report
+      # ---------- Final report ----------
+      - name: Final status
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
