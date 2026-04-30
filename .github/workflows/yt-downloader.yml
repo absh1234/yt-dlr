@@ -1,197 +1,166 @@
-name: YT Downloader Pro
+name: 🎬 YouTube Downloader to Bale (Enhanced Proxy)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "YouTube URL"
+        description: 'لینک ویدیو یوتیوب'
         required: true
       quality:
-        description: "best / 720 / audio"
+        description: 'کیفیت (best, 720p, audio)'
         required: true
-        default: "best"
-      mode:
-        description: "piped / ytdlp / ytdlp-vpn"
-        required: true
-        default: "piped"
+        default: 'best'
       target_chat_id:
-        description: "Bale Chat ID"
+        description: 'شناسه کاربر دریافت‌کننده'
         required: true
 
 jobs:
   download-and-send:
     runs-on: ubuntu-latest
-
     env:
-      TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-      CHAT_ID: ${{ github.event.inputs.target_chat_id }}
-      URL: ${{ github.event.inputs.url }}
-      MODE: ${{ github.event.inputs.mode }}
-      QUALITY: ${{ github.event.inputs.quality }}
-
+      BALE_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg curl jq python3
 
-      # ------------------------------------------------
-      # Cache tools
-      # ------------------------------------------------
-      - name: Cache ffmpeg
-        uses: actions/cache@v4
-        with:
-          path: ffmpeg-bin
-          key: ffmpeg-cache-v1
-
-      - name: Install ffmpeg if not cached
+      - name: Extract video ID and get streams
+        id: streams
         run: |
-          if [ ! -f ffmpeg-bin/ffmpeg ]; then
-            mkdir -p ffmpeg-bin
-            curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
-            tar -xf ffmpeg.tar.xz
-            mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-bin/
-          fi
-          echo "$PWD/ffmpeg-bin" >> $GITHUB_PATH
+          # استخراج دقیق Video ID
+          VIDEO_ID=$(echo "${{ inputs.url }}" | sed -n 's/.[?&]v=\([^&]*\).*/\1/p; s/.*youtu.be\/\([^?]*\).*/\1/p; s/.*youtube.com\/embed\/\([^?]*\).*/\1/p' | tail -1)
+          [ -z "$VIDEO_ID" ] && echo "Invalid URL" && exit 1
+          echo "Video ID: $VIDEO_ID"
 
-      - name: Cache yt-dlp
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/bin
-          key: ytdlp-cache-v1
+          # لیست اینستنس‌های جایگزین برای اطمینان از کارکرد (اگر یکی بلاک بود، دیگری استفاده شود)
+          INSTANCES=("pipedapi.kavin.rocks" "pipedapi.canary.yt" "pipedapi.privacy.dev")
 
-      - name: Install yt-dlp if not cached
-        run: |
-          mkdir -p ~/.local/bin
-          if [ ! -f ~/.local/bin/yt-dlp ]; then
-            curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp
-            chmod +x ~/.local/bin/yt-dlp
-          fi
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          SUCCESS=false
+          for INSTANCE in "${INSTANCES[@]}"; do
+            echo "Trying instance: $INSTANCE"
+            API="https://$INSTANCE/streams/${VIDEO_ID}"
+            STREAMS=$(curl -s --connect-timeout 10 "$API")
 
-      # ------------------------------------------------
-      # Optional Xray
-      # ------------------------------------------------
-      - name: Setup Xray (if vpn mode)
-        if: ${{ github.event.inputs.mode == 'ytdlp-vpn' }}
-        run: |
-          mkdir -p xray-bin
-          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
-          unzip -o xray.zip
-          mv xray xray-bin/
-          chmod +x xray-bin/xray
+            if [ -n "$STREAMS" ] && [ "$STREAMS" != "null" ] && [ "$(echo "$STREAMS" | jq '.videoStreams | length')" -gt 0 ]; then
+              echo "Successfully connected to $INSTANCE"
+              echo "STREAMS=$STREAMS" >> $GITHUB_ENV
+              SUCCESS=true
+              break
+            fi
+            echo "Instance $INSTANCE failed, trying next..."
+          done
 
-          cat <<EOF > config.json
-          {
-            "log": { "loglevel": "warning" },
-            "inbounds": [{
-              "port": 10808,
-              "listen": "127.0.0.1",
-              "protocol": "socks",
-              "settings": { "udp": true }
-            }],
-            "outbounds": [{
-              "protocol": "vless",
-              "settings": {
-                "vnext": [{
-                  "address": "gwna1itwdw8-5ro7g-kp72r8st8jcbul.abolfazlsh444.workers.dev",
-                  "port": 443,
-                  "users": [{
-                    "id": "dc90d0ad-4897-4422-8d98-ae81d18576de",
-                    "encryption": "none"
-                  }]
-                }]
-              },
-              "streamSettings": {
-                "network": "ws",
-                "security": "tls",
-                "wsSettings": {
-                  "path": "/eyJqdW5rIjoiWjRQN3pUN2I1dG8iLCJwcm90b2NvbCI6InZsIiwibW9kZSI6InByb3h5aXAiLCJwYW5lbElQcyI6W119?ed=2560"
-                }
-              }
-            }]
-          }
-          EOF
-
-          ./xray-bin/xray -config config.json &
-          sleep 5
-
-      # ------------------------------------------------
-      # Send start message
-      # ------------------------------------------------
-      - name: Notify start
-        run: |
-          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
-            -d chat_id=$CHAT_ID \
-            -d text="⏳ دانلود شروع شد..."
-
-      # ------------------------------------------------
-      # Download Logic
-      # ------------------------------------------------
-      - name: Download
-        run: |
-          set -e
-
-          if [ "$MODE" = "piped" ]; then
-            VIDEO_ID=$(echo "$URL" | sed 's/.*v=//')
-            curl -s https://piped.video/api/v1/streams/$VIDEO_ID -o streams.json
-            DL=$(jq -r '.videoStreams[0].url' streams.json)
-            curl -L "$DL" -o output.mp4
-
-          elif [ "$MODE" = "ytdlp" ]; then
-            yt-dlp -f best -o output.mp4 "$URL"
-
-          elif [ "$MODE" = "ytdlp-vpn" ]; then
-            export ALL_PROXY=socks5://127.0.0.1:10808
-            yt-dlp -f best -o output.mp4 "$URL"
+          if [ "$SUCCESS" = false ]; then
+            echo "All Piped instances are blocked or unavailable."
+            exit 1
           fi
 
-      # ------------------------------------------------
-      # Notify downloaded
-      # ------------------------------------------------
-      - name: Notify downloaded
-        run: |
-          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
-            -d chat_id=$CHAT_ID \
-            -d text="✅ دانلود کامل شد. در حال بررسی حجم فایل..."
+          # انتخاب استریم بر اساس کیفیت انتخابی کاربر
+          if [ "${{ inputs.quality }}" = "audio" ]; then
 
-      # ------------------------------------------------
-      # Split if >10MB
-      # ------------------------------------------------
-      - name: Split if needed
-        run: |
-          SIZE=$(stat -c%s output.mp4)
-          LIMIT=$((10 * 1024 * 1024))
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].url')
+            EXT=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | .[0].quality' | sed 's/.*\.//')
+            [ -z "$EXT" ] || [ "$EXT" = "null" ] && EXT="m4a"
+          elif [ "${{ inputs.quality }}" = "720p" ]; then
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.videoStreams | map(select(.height <= 720)) | sort_by(-.height) | .[0].url')
+            EXT="mp4"
+          else  # best
+            STREAM_URL=$(echo "$STREAMS" | jq -r '.videoStreams | sort_by(-.height) | reverse | .[0].url')
+            EXT="mp4"
+          fi
 
-          if [ $SIZE -gt $LIMIT ]; then
-            mkdir parts
-            ffmpeg -i output.mp4 -c copy -map 0 \
-              -f segment -segment_time 300 \
-              -reset_timestamps 1 parts/output_%03d.mp4
-            echo "SPLIT=true" >> $GITHUB_ENV
+          # در صورتی که مستقیم لینک ویدیو+صدا وجود نداشت (در حالت best)
+          if [ "$STREAM_URL" = "null" ]; then
+            echo "Direct stream not found, splitting video and audio..."
+            VID_URL=$(echo "$STREAMS" | jq -r '.videoStreams | sort_by(-.height) | reverse | .[0].url')
+            AUD_URL=$(echo "$STREAMS" | jq -r '.audioStreams | sort_by(-.bitrate) | reverse | .[0].url')
+            echo "VID_URL=$VID_URL" >> $GITHUB_ENV
+            echo "AUD_URL=$AUD_URL" >> $GITHUB_ENV
+            echo "MODE=split" >> $GITHUB_ENV
           else
-            echo "SPLIT=false" >> $GITHUB_ENV
+            echo "STREAM_URL=$STREAM_URL" >> $GITHUB_ENV
+            echo "MODE=single" >> $GITHUB_ENV
+          fi
+          echo "EXT=$EXT" >> $GITHUB_ENV
+
+      - name: Download and (if needed) merge
+        run: |
+          if [ "$MODE" = "single" ]; then
+            curl -L "$STREAM_URL" -o "media.$EXT"
+          else
+            curl -L "$VID_URL" -o video.mp4
+            curl -L "$AUD_URL" -o audio.m4a
+            ffmpeg -i video.mp4 -i audio.m4a -c copy -map 0:v -map 1:a "media.mp4"
           fi
 
-      # ------------------------------------------------
-      # Upload to Bale
-      # ------------------------------------------------
-      - name: Send to Bale
+          FILE=$(ls media.* 2>/dev/null | head -n1)
+          [ -z "$FILE" ] && echo "Download failed" && exit 1
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          SIZE=$(stat -c%s "$FILE")
+          echo "SIZE=$SIZE" >> $GITHUB_ENV
+
+      - name: Split and send to Bale
         run: |
-          if [ "$SPLIT" = "true" ]; then
-            for f in parts/*.mp4; do
-              curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendVideo \
-                -F chat_id=$CHAT_ID \
-                -F video=@"$f"
+          TOKEN="$BALE_TOKEN"
+          CHAT_ID="${{ inputs.target_chat_id }}"
+          FILE="$FILE"
+          SIZE="$SIZE"
+          QUALITY="${{ inputs.quality }}"
+
+          # محدودیت فایل در بله حدود ۱۰ مگابایت است (بسته به نوع اکانت)
+          # ما روی ۱۰ مگابایت تنظیم می‌کنیم
+          if [ "$SIZE" -le 10485760 ]; then
+            if [ "$QUALITY" = "audio" ]; then
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                -F "audio=@${FILE}" -F "caption=🎵 فایل صوتی"
+            else
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                -F "video=@${FILE}" -F "caption=🎬 ویدیوی شما (${QUALITY})"
+            fi
+            exit 0
+          fi
+
+          # عملیات تکه تکه کردن فایل‌های بزرگ
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${FILE}")
+          # محاسبه بیت‌ریت برای تقسیم‌بندی هوشمند بر اساس زمان
+          BITRATE=$(python3 -c "print(int(${SIZE}  8 / float(${DURATION})))")
+          # هدف: هر پارت حدود ۹ مگابایت باشد تا از ۱۰ مگابایت بیشتر نشود
+          TARGET_SIZE_BYTES=9437184
+          SEG_TIME=$(python3 -c "print(round(${TARGET_SIZE_BYTES}  0.9 / (${BITRATE}/8), 2))")
+
+          # جلوگیری از SEG_TIME خیلی کم
+          if (( $(echo "$SEG_TIME < 10" | bc -l) )); then SEG_TIME=30; fi
+
+          EXT="${FILE##*.}"
+          mkdir parts && cd parts
+          ffmpeg -v quiet -stats -i "../${FILE}" -f segment -segment_time "${SEG_TIME}" \
+            -c copy -reset_timestamps 1 "part_%03d.${EXT}"
+
+          TOTAL=$(ls part_*.${EXT} | wc -l)
+          COUNT=1
+          for PART in part_*.${EXT}; do
+            SUCCESS=0
+            for ATTEMPT in 1 2 3; do
+              if [ "$QUALITY" = "audio" ]; then
+
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendAudio?chat_id=${CHAT_ID}" \
+                  -F "audio=@${PART}" -F "caption=🎵 پارت ${COUNT}/${TOTAL}")
+              else
+                RESP=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo?chat_id=${CHAT_ID}" \
+                  -F "video=@${PART}" -F "caption=🎬 پارت ${COUNT}/${TOTAL} (${QUALITY})")
+              fi
+              echo "$RESP" | grep -q '"ok":true' && SUCCESS=1 && break
+              sleep 2
             done
-          else
-            curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendVideo \
-              -F chat_id=$CHAT_ID \
-              -F video=@output.mp4
-          fi
+            [ $SUCCESS -eq 0 ] && echo "Failed to send part $COUNT"
+            COUNT=$((COUNT + 1))
+            sleep 1
+          done
 
-      # ------------------------------------------------
-      # Final message
-      # ------------------------------------------------
-      - name: Final notify
+      - name: Final report
+        if: always()
         run: |
-          curl -s -X POST https://tapi.bale.ai/bot$TOKEN/sendMessage \
-            -d chat_id=$CHAT_ID \
-            -d text="🎉 عملیات با موفقیت انجام شد."
+          if [ "${{ job.status }}" = "success" ]; then
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ عملیات با موفقیت انجام شد."
+          else
+            curl -s "https://tapi.bale.ai/bot${BALE_TOKEN}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ خطا در دانلود یا ارسال."
+          fi
