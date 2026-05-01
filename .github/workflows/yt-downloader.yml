@@ -391,10 +391,22 @@ jobs:
       - name: Final report
         if: always()
         run: |
+          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
+          CHAT_ID="${{ inputs.target_chat_id }}"
+
+          # Check what failed and build appropriate message
           if [ "${{ job.status }}" = "success" ]; then
-            TEXT="✅ Operation Completed Successfully."
+            TEXT="✅ عملیات موفق بود"
+          elif [ ! -f final_config.json ]; then
+            TEXT="❌ وی پی ان مشکل دارد"
+          elif [ ! -f "${{ env.FILE }}" ] && [ -f final_config.json ]; then
+            # VPN worked but download failed
+            TEXT="❌ وی یپ ان کار میکند اما دسترسی به یوتوب غیر ممکن بود"
+          elif [ "${{ env.FILE }}" ] && [ ! -f parts/part_001.mp4 ] && [ "${{ env.SIZE }}" -gt 10485760 ]; then
+            TEXT="⚠️ پارتیشن بدنی با شکست مواجه شد(احتمالا فایل بزرگ است)"
           else
-            TEXT="❌ Operation Failed."
+            TEXT="❌ عملیات ناموفق بود"
           fi
+
           ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TEXT'))")
-          curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=${ENCODED}"
+          curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${ENCODED}"
