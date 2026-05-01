@@ -109,22 +109,16 @@ jobs:
           EOF
           chmod +x ~/solver/n
           echo "$HOME/solver" >> $GITHUB_PATH
-
-      # ---------- Download media ----------
+    #---------------download---------
       - name: Download media from YouTube
         run: |
-          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
-            echo "${{ secrets.YOUTUBE_COOKIES }}" > youtube_cookies.txt
-            COOKIE_FLAG="--cookies youtube_cookies.txt"
-          else
-            COOKIE_FLAG=""
-          fi
-
+          # No cookies – rely on the proxy + mobile clients to avoid challenges
           YT_FLAGS=(
             --proxy socks5://127.0.0.1:10808
-            $COOKIE_FLAG
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            --extractor-args "youtube:player_client=web_embedded,web"
+            --user-agent "com.google.ios.youtube/19.45.2 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
+            --extractor-args "youtube:player_client=ios,android,tv"
+            --extractor-retries 5
+            --retries 5
             -o "media.%(ext)s"
             "${{ inputs.url }}"
           )
@@ -153,6 +147,5 @@ jobs:
           fi
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
-
       # ---------- Split & send ----------
       # ... (keep your existing splitting and sending steps unchanged) ...
