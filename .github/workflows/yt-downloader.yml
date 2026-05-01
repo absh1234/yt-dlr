@@ -86,11 +86,29 @@ jobs:
 
       - name: Start Xray proxy
         run: |
-          xray run -config final_config.json &
-          sleep 2
-          curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
-          echo "✅ Best proxy is active"
-
+          # Start Xray with his own config and log to file
+          xray run -config final_config.json > /tmp/xray.log 2>&1 &
+          echo "Waiting for proxy on 127.0.0.1:10808 ..."
+          # Wait up to 30 seconds for the SOCKS5 port to open
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 10808; then
+              echo "Proxy is listening."
+              break
+            fi
+            sleep 1
+          done
+          # If still not open, show what happened
+          if ! nc -z 127.0.0.1 10808; then
+            echo "ERROR: Proxy failed to start. Xray log:"
+            cat /tmp/xray.log
+            exit 1
+          fi
+          # Perform a real YouTube request through the proxy
+          if ! curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/favicon.ico -o /dev/null -w '%{http_code}'; then
+            echo "WARNING: Proxy connection to YouTube failed."
+          else
+            echo "✅ Proxy to YouTube works."
+          fi
 
     #---------------download---------
       - name: Download media from YouTube
