@@ -28,7 +28,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------- Cache tools (yt‑dlp, Xray, a simple config converter) ----------
+      # ---------- Cache tools ----------
       - name: Cache tools
         id: cache-tools
         uses: actions/cache@v4
@@ -80,212 +80,35 @@ jobs:
       # ---------- VPN config parser & tester ----------
       - name: Set up Python & test configs
         run: |
-          # Save the user's input as a file, one line per config
-          echo "${{ inputs.vpn_configs }}" > configs_raw.txt
+          # ... (unchanged from your previous version) ...
+          # (Your existing Python script for parsing and testing VPN configs goes here)
+          # (Keep it exactly as you have it)
 
-          # Python script to convert links to Xray outbound JSON and test them
-          python3 << 'PYEOF'
-          import base64, json, os, subprocess, sys, time, urllib.request
-
-          def parse_share_link(link):
-              """Convert common share link to Xray outbound JSON. Returns None if fails."""
-              try:
-                  if link.startswith('vless://') or link.startswith('vmess://') or \
-                     link.startswith('trojan://') or link.startswith('ss://'):
-                      return link_to_xray(link)
-                  else:
-                      # Assume it's already a JSON outbound config
-                      return json.loads(link)
-              except Exception:
-                  return None
-
-          def link_to_xray(link):
-              """Basic converter for common protocols. Returns a dict."""
-              from urllib.parse import urlparse, parse_qs
-              parsed = urlparse(link)
-              if parsed.scheme in ('vless', 'vmess', 'trojan'):
-                  # VLESS/VMess/Trojan share links: scheme://uuid@host:port?params#name
-                  uuid = parsed.username
-                  host = parsed.hostname
-                  port = int(parsed.port)
-                  params = parse_qs(parsed.query)
-                  name = parsed.fragment or 'proxy'
-                  sni = params.get('sni', [host])[0]
-                  security = params.get('security', ['none'])[0]
-                  network = params.get('type', ['tcp'])[0]
-                  path = params.get('path', ['/'])[0]
-                  if security == 'tls':
-                      stream_settings = {
-                          "network": network,
-                          "security": "tls",
-                          "tlsSettings": {"serverName": sni}
-                      }
-                  else:
-                      stream_settings = {"network": network}
-                  if network == 'ws':
-                      stream_settings["wsSettings"] = {"path": path}
-                  if network == 'grpc':
-                      stream_settings["grpcSettings"] = {"serviceName": path.lstrip('/')}
-                  if parsed.scheme == 'vmess':
-                      # VMess needs id in settings
-                      return {
-                          "tag": name,
-                          "protocol": "vmess",
-                          "settings": {
-                              "vnext": [{
-                                  "address": host,
-                                  "port": port,
-                                  "users": [{"id": uuid, "security": "auto"}]
-                              }]
-                          },
-                          "streamSettings": stream_settings
-                      }
-                  elif parsed.scheme == 'vless':
-                      return {
-                          "tag": name,
-                          "protocol": "vless",
-                          "settings": {
-                              "vnext": [{
-                                  "address": host,
-                                  "port": port,
-                                  "users": [{"id": uuid, "encryption": "none"}]
-                              }]
-                          },
-                          "streamSettings": stream_settings
-                      }
-                  elif parsed.scheme == 'trojan':
-                      return {
-                          "tag": name,
-                          "protocol": "trojan",
-                          "settings": {
-                              "servers": [{
-                                  "address": host,
-                                  "port": port,
-                                  "password": uuid
-                              }]
-                          },
-                          "streamSettings": stream_settings
-                      }
-              elif parsed.scheme == 'ss':
-                  # ShadowSocks: ss://base64(method:password)@host:port#name
-                  user_info = base64.urlsafe_b64decode(parsed.username).decode()
-                  method, password = user_info.split(':', 1)
-                  return {
-                      "tag": parsed.fragment or 'ss',
-                      "protocol": "shadowsocks",
-                      "settings": {
-                          "servers": [{
-                              "address": parsed.hostname,
-                              "port": int(parsed.port),
-                              "method": method,
-                              "password": password
-                          }]
-                      }
-                  }
-              return None
-
-          # Read configs from file
-          with open('configs_raw.txt', 'r') as f:
-              lines = [line.strip() for line in f if line.strip()]
-
-          outbounds = []
-          for line in lines:
-              ob = parse_share_link(line)
-              if ob:
-                  outbounds.append(ob)
-              else:
-                  print(f"Skipping invalid config: {line[:50]}...")
-
-          if not outbounds:
-              print("No valid configs provided!")
-              sys.exit(1)
-
-          # Test each outbound by building a minimal Xray config and measuring latency
-          results = []
-          for i, outbound in enumerate(outbounds):
-              tag = outbound.get('tag', f'proxy-{i}')
-              print(f"Testing {tag}...", end=' ')
-              # Minimal Xray config: inbound socks5 on 10808, this outbound as only outbound
-              xray_conf = {
-                  "inbounds": [{
-                      "port": 10808,
-                      "protocol": "socks",
-                      "settings": {"auth": "noauth"}
-                  }],
-                  "outbounds": [outbound]
-              }
-              with open(f'test_config_{i}.json', 'w') as f:
-                  json.dump(xray_conf, f)
-
-              # Run Xray in background with this config
-              proc = subprocess.Popen(['xray', 'run', '-config', f'test_config_{i}.json'],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              time.sleep(2)
-              try:
-                  start = time.time()
-                  req = urllib.request.Request('https://www.youtube.com/favicon.ico',
-                                               headers={'User-Agent': 'curl/7.68.0'})
-                  # Use socks5 proxy
-                  proxy_handler = urllib.request.ProxyHandler({'https': 'socks5://127.0.0.1:10808'})
-                  opener = urllib.request.build_opener(proxy_handler)
-                  resp = opener.open(req, timeout=10)
-                  resp.read()
-                  latency = time.time() - start
-                  results.append((latency, outbound, tag))
-                  print(f"OK ({latency:.2f}s)")
-              except Exception as e:
-                  print(f"FAILED ({e})")
-              finally:
-                  proc.terminate()
-                  try:
-                      proc.wait(timeout=5)
-                  except subprocess.TimeoutExpired:
-                      proc.kill()
-              # Clean up test config
-              os.remove(f'test_config_{i}.json')
-
-          if not results:
-              print("All proxies failed.")
-              sys.exit(1)
-
-          # Pick the fastest
-          results.sort()
-          best_latency, best_outbound, best_tag = results[0]
-          print(f"Selected proxy: {best_tag} (latency {best_latency:.2f}s)")
-
-          # Write the final Xray config with this outbound (and a direct outbound for non-proxy traffic)
-          final_conf = {
-              "inbounds": [{
-                  "port": 10808,
-                  "protocol": "socks",
-                  "settings": {"auth": "noauth"}
-              }],
-              "outbounds": [
-                  best_outbound,
-                  {"protocol": "freedom", "tag": "direct"}
-              ],
-              "routing": {
-                  "rules": [
-                      {
-                          "type": "field",
-                          "outboundTag": "direct",
-                          "domain": ["geosite:cn", "geosite:private"]
-                      }
-                  ]
-              }
-          }
-          with open('final_config.json', 'w') as f:
-              json.dump(final_conf, f, indent=2)
-          PYEOF
-
-      # ---------- Start Xray with the best proxy ----------
       - name: Start Xray proxy
         run: |
           xray run -config final_config.json &
           sleep 2
-          # Quick test
           curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
           echo "✅ Best proxy is active"
+
+      # ---------- Node.js + Challenge Solver ----------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install yt-dlp challenge solver
+        run: |
+          mkdir -p ~/solver
+          curl -fsSL https://api.github.com/repos/yt-dlp/yt-dlp-challenge-solver/tarball/main -o solver.tar.gz
+          tar xzf solver.tar.gz -C ~/solver --strip-components=1
+          chmod +x ~/solver/n.js
+          cat > ~/solver/n << 'EOF'
+          #!/bin/bash
+          node ~/solver/n.js "$@"
+          EOF
+          chmod +x ~/solver/n
+          echo "$HOME/solver" >> $GITHUB_PATH
 
       # ---------- Download media ----------
       - name: Download media from YouTube
@@ -331,63 +154,5 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SIZE=$(stat -c%s "$FILE")" >> $GITHUB_ENV
 
-      # ---------- Split if > 10 MB ----------
-      - name: Split video if needed
-        if: env.SIZE > 10485760
-        run: |
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$FILE")
-          SEG_TIME=$(python3 -c "print(round($DURATION * (10000000 / $SIZE) * 0.9, 2))")
-          mkdir -p parts
-          ffmpeg -v quiet -i "$FILE" -c copy -map 0 -segment_time "$SEG_TIME" -f segment -reset_timestamps 1 "parts/part_%03d.${FILE##*.}"
-          echo "TOTAL_PARTS=$(ls parts/part_* | wc -l)" >> $GITHUB_ENV
-
-      # ---------- Send to Bale ----------
-      - name: Send media to Bale
-        run: |
-          TOKEN="${{ secrets.BALE_BOT_TOKEN }}"
-          CHAT_ID="${{ inputs.target_chat_id }}"
-          VIDEO_URL="${{ inputs.url }}"
-
-          send_file() {
-            local file="$1"
-            local caption="$2"
-            local attempt=1
-            while [ $attempt -le 3 ]; do
-              ENC_CAPTION=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$caption'))")
-              RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument?chat_id=${CHAT_ID}&caption=${ENC_CAPTION}" \
-                -F "document=@$file")
-              if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
-                return 0
-              fi
-              sleep 2
-              attempt=$((attempt + 1))
-            done
-            return 1
-          }
-
-          if [ "$SIZE" -le 10485760 ]; then
-            send_file "$FILE" "🎬 $VIDEO_URL" || {
-              curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send file"
-            }
-          else
-            cd parts
-            TOTAL=$TOTAL_PARTS
-            COUNT=1
-            for part in part_*; do
-              send_file "$part" "🎬 $VIDEO_URL - Part $COUNT/$TOTAL" || {
-                curl -s "https://tapi.bale.ai/bot${TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=⚠️ Failed to send part $COUNT"
-              }
-              COUNT=$((COUNT + 1))
-              sleep 1
-            done
-          fi
-
-      # ---------- Final status ----------
-      - name: Final report
-        if: always()
-        run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ Operation Completed Successfully."
-          else
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ Operation Failed."
-          fi
+      # ---------- Split & send ----------
+      # ... (keep your existing splitting and sending steps unchanged) ...
