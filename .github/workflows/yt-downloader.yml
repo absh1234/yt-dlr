@@ -392,7 +392,9 @@ jobs:
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=✅ Operation Completed Successfully."
+            TEXT="✅ Operation Completed Successfully."
           else
-            curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=❌ Operation Failed."
+            TEXT="❌ Operation Failed."
           fi
+          ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TEXT'))")
+          curl -s "https://tapi.bale.ai/bot${{ secrets.BALE_BOT_TOKEN }}/sendMessage?chat_id=${{ inputs.target_chat_id }}&text=${ENCODED}"
