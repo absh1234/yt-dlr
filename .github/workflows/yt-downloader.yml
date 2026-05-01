@@ -91,24 +91,7 @@ jobs:
           curl -s --socks5 127.0.0.1:10808 https://www.youtube.com/ | head -c 100
           echo "✅ Best proxy is active"
 
-      # ---------- Node.js + Challenge Solver ----------
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
-      - name: Install yt-dlp challenge solver
-        run: |
-          mkdir -p ~/solver
-          curl -fsSL https://api.github.com/repos/yt-dlp/yt-dlp-challenge-solver/tarball/main -o solver.tar.gz
-          tar xzf solver.tar.gz -C ~/solver --strip-components=1
-          chmod +x ~/solver/n.js
-          cat > ~/solver/n << 'EOF'
-          #!/bin/bash
-          node ~/solver/n.js "$@"
-          EOF
-          chmod +x ~/solver/n
-          echo "$HOME/solver" >> $GITHUB_PATH
     #---------------download---------
       - name: Download media from YouTube
         run: |
