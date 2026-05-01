@@ -1,0 +1,5 @@
+{
+  "BALE_BOT_TOKEN": "---",
+  "GH_PAT": "---",
+  "REPO_FULL_NAME": "---" #repo that runs actions
+}
