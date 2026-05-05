@@ -303,8 +303,8 @@ jobs:
           # No cookies – rely on the proxy + mobile clients to avoid challenges
           YT_FLAGS=(
             --proxy socks5://127.0.0.1:10808
-            --user-agent "com.google.ios.youtube/19.45.2 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
-            --extractor-args "youtube:player_client=ios,android,tv"
+            --user-agent "com.google.android.youtube/19.45.2 (Linux; U; Android 14; en_US)"
+            --extractor-args "youtube:player_client=android,web_embedded"
             --extractor-retries 5
             --retries 5
             -o "media.%(ext)s"
